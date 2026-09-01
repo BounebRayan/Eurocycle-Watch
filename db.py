@@ -127,9 +127,14 @@ def upsert_products_and_snapshot(records, snapshot_date: str | None = None) -> N
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(distributor, pid, snapshot_date) DO UPDATE SET
                     scraped_at=excluded.scraped_at, price=excluded.price, sale_price=excluded.sale_price,
-                    discount_pct=excluded.discount_pct, in_stock=excluded.in_stock,
-                    availability_raw=excluded.availability_raw, rating=excluded.rating,
-                    review_count=excluded.review_count,
+                    discount_pct=excluded.discount_pct,
+                    -- enrich-only fields: a run that didn't observe them (price-only,
+                    -- or blocked) passes NULL and must not clobber a value another
+                    -- run recorded for the same day. Same rule as merch_badges.
+                    in_stock=COALESCE(excluded.in_stock, snapshots.in_stock),
+                    availability_raw=COALESCE(excluded.availability_raw, snapshots.availability_raw),
+                    rating=COALESCE(excluded.rating, snapshots.rating),
+                    review_count=COALESCE(excluded.review_count, snapshots.review_count),
                     merch_badges=COALESCE(excluded.merch_badges, snapshots.merch_badges)
                 """,
                 (

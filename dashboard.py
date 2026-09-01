@@ -160,14 +160,52 @@ if filtered.empty:
 dates = sorted(filtered["snapshot_date"].unique())
 latest_date = dates[-1]
 prev_date = dates[-2] if len(dates) > 1 else None
-latest = filtered[filtered["snapshot_date"] == latest_date]
-prev = filtered[filtered["snapshot_date"] == prev_date] if prev_date is not None else None
+
+# Rating / reviews / badges / stock come only from the manual local enrich pass
+# (Halfords blocks automated browsers, so the daily cloud refresh is price-only).
+# For the "latest" view, carry each of those forward from the most recent
+# snapshot that actually observed it - otherwise the dashboard shows n/a for
+# ratings on every day between local runs. Trends and Data health keep raw
+# per-snapshot values; only `latest` / `prev` are filled.
+ENRICH_COLS = ["rating", "review_count", "in_stock", "merch_badges"]
+
+
+def carry_forward(frame, as_of):
+    """Returns the frame with enrich columns filled, plus {col: last-observed
+    date} so callers can say how stale each field is (badges and ratings often
+    have different ages - a badge pass can succeed on a day enrich doesn't)."""
+    frame = frame.copy()
+    hist = filtered[filtered["snapshot_date"] <= as_of].sort_values("snapshot_date")
+    stamps = {}
+    for col in ENRICH_COLS:
+        seen = hist[hist[col].notna()]
+        if seen.empty:
+            continue
+        frame[col] = frame[col].fillna(frame["pid"].map(seen.groupby("pid")[col].last()))
+        stamps[col] = seen["snapshot_date"].max()
+    return frame, stamps
+
+
+latest, enrich_stamps = carry_forward(filtered[filtered["snapshot_date"] == latest_date],
+                                      latest_date)
+prev = None
+if prev_date is not None:
+    prev, _ = carry_forward(filtered[filtered["snapshot_date"] == prev_date], prev_date)
+
+rating_as_of = enrich_stamps.get("rating")
+rating_stale = rating_as_of is not None and pd.Timestamp(rating_as_of) < pd.Timestamp(latest_date)
 
 days_old = (pd.Timestamp.now().normalize() - pd.Timestamp(latest_date)).days
 freshness = "today" if days_old == 0 else ("yesterday" if days_old == 1 else f"{days_old} days ago")
+if rating_as_of is None:
+    enrich_note = " · no ratings collected yet"
+elif rating_stale:
+    enrich_note = f" · ratings as of **{pd.Timestamp(rating_as_of).date()}** (price-only since)"
+else:
+    enrich_note = ""
 st.caption(f"Latest snapshot **{pd.Timestamp(latest_date).date()}** ({freshness}) · "
            f"{len(dates)} snapshot{'s' if len(dates) != 1 else ''} on file · "
-           f"{filtered['pid'].nunique()} models ever seen")
+           f"{filtered['pid'].nunique()} models ever seen{enrich_note}")
 
 
 def delta_or_none(cur, before):
@@ -227,17 +265,20 @@ d1.metric("Price range",
           border=True, height=TILE_H,
           help=(f"Cheapest: {lo_row['title']}\n\nPriciest: {hi_row['title']}")
           if lo_row is not None else None)
+_rating_help = ("No ratings collected yet — run the local enrich pass."
+                if avg_rating is None else
+                f"Mean across {len(rated_now)} rated models"
+                + (f", last observed {pd.Timestamp(rating_as_of).date()}."
+                   if rating_stale else "."))
 d2.metric("Average rating",
           f"{avg_rating:.2f} / 5" if avg_rating is not None else "n/a",
           delta=(f"{avg_rating - avg_rating_prev:+.2f}"
                  if delta_or_none(avg_rating, avg_rating_prev) else None),
-          border=True, height=TILE_H,
-          help=(f"Mean across {len(rated_now)} rated models."
-                if avg_rating is not None else
-                "No rating data this snapshot — the enrich pass didn't get through."))
+          border=True, height=TILE_H, help=_rating_help)
 d3.metric("Models rated", f"{len(rated_now)} / {n_now}" if n_now else "n/a",
           border=True, height=TILE_H,
-          help="Listed models carrying a star rating in the latest snapshot.")
+          help="Listed models with a star rating (carried forward from the last "
+               "enrich run on price-only days).")
 d4.metric("Total reviews", f"{int(reviews_now):,}" if reviews_now else "n/a",
           border=True, height=TILE_H,
           help="Sum of review counts across rated models — a rough traction proxy.")
@@ -465,17 +506,23 @@ with tab_ratings:
     rated = latest.dropna(subset=["rating"]).copy()
     if rated.empty:
         st.info(
-            "No ratings in the latest snapshot. Rating and review counts ride on "
-            "the badge / enrich pass, which is best-effort against Halfords' bot "
-            "protection — see the Data health tab. Re-run `python run_daily.py` "
-            "after a cooldown."
+            "No ratings collected yet. Rating, review counts and badges ride on "
+            "the local enrich pass (`python run_daily.py`), which is best-effort "
+            "against Halfords' bot protection — the daily cloud refresh is "
+            "price-only. See the Data health tab. Re-run it locally after a "
+            "cooldown, then commit the DB."
         )
     else:
         rated["review_count"] = rated["review_count"].fillna(0).astype(int)
         rated["short"] = short_titles(rated["title"])
         n_rated = len(rated)
-        st.caption(f"{n_rated} of {int(latest['pid'].nunique())} listed models carry a "
-                   f"rating in the {pd.Timestamp(latest_date).date()} snapshot.")
+        stamp = pd.Timestamp(rating_as_of or latest_date).date()
+        st.caption(
+            f"{n_rated} of {int(latest['pid'].nunique())} listed models carry a rating"
+            + (f", last observed {stamp} — carried forward on price-only days since. "
+               "Re-run the local enrich pass to refresh." if rating_stale
+               else f", as observed on {stamp}.")
+        )
 
         MIN_REVIEWS = 3
         st.subheader("Best rated")
