@@ -1,0 +1,48 @@
+name: Refresh catalog snapshot
+
+# Streamlit Community Cloud can't run the local scheduled scraper (ephemeral
+# disk, no cron), so this workflow takes the daily catalog+price snapshot in CI
+# and commits the updated SQLite file back to main. Streamlit redeploys on push.
+#
+# Only the catalog+price pass runs here (`--no-badges`). That path is pure
+# `requests` against the Bloomreach search API - no browser, no Akamai. The
+# badge / rating passes still need headless Chromium and stay a local,
+# best-effort, manual thing (see README).
+
+on:
+  schedule:
+    - cron: "30 5 * * *"   # 05:30 UTC daily
+  workflow_dispatch: {}     # manual "Run workflow" button
+
+permissions:
+  contents: write           # the job pushes the refreshed DB
+
+concurrency:
+  group: refresh-data
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests
+
+      - run: python run_daily.py --no-badges
+
+      - name: Commit refreshed snapshot
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/apollo_dashboard.db
+          if git diff --cached --quiet; then
+            echo "Snapshot unchanged - nothing to commit."
+          else
+            git commit -m "data: catalog snapshot $(date -u +%F) [skip ci]"
+            git push
+          fi

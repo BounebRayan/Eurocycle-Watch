@@ -1,4 +1,7 @@
 .venv/
 __pycache__/
 data/*.db
+# ...except the live snapshot DB - it's committed so Streamlit Cloud (ephemeral
+# disk, can't run the scraper) has data, and the daily GitHub Action commits it.
+!data/apollo_dashboard.db
 *.log
