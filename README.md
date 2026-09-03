@@ -1,8 +1,22 @@
-# Apollo Distributor Watch
+# Eurocycles Dashboard
 
-Daily snapshots of Apollo-branded bikes as listed on distributor sites
-(currently Halfords), tracking price/discount drift, catalog changes
-(new/delisted models), and — best-effort — stock status and ratings.
+Two views, one app (`streamlit run dashboard.py`):
+
+- **Distributor watch** — daily snapshots of Apollo-branded bikes as listed on
+  distributor sites (currently Halfords): price/discount drift, catalog changes
+  (new/delisted models), and — best-effort — stock status and ratings. Reads the
+  committed SQLite snapshot; works anywhere.
+- **Management** — the internal cost / margin / production picture from the
+  Eurocycles ERP (SQL Server), in six tabs: **Overview** (company scoreboard),
+  **Models** (best/worst, cost vs sale price per bike, margin drift), **Customers**
+  (per-distributor scorecard + shipment plan vs actual), **Production** (plan
+  attainment, label throughput, line-flow time), **Supply & cost** (component
+  price inflation, supplier spend, quality claims, PO pipeline), **Finance**
+  (billings vs collections, commission cost). **Local-only** — the ERP is on
+  `(localdb)\MSSQLLocalDB` and isn't reachable from Streamlit Cloud, so the view
+  shows an explainer there. See
+  [`docs/eurocycles-erp-findings.md`](docs/eurocycles-erp-findings.md) (§12b for
+  what each tab supports).
 
 ## How it's built
 
@@ -13,9 +27,30 @@ apollo-dashboard/
     halfords.py   # Halfords: catalog+price via their search API, stock/rating via page scrape
   db.py            # SQLite schema (products, snapshots, run_log) + upsert helpers
   run_daily.py     # CLI orchestrator - run this daily (or by hand)
-  dashboard.py     # Streamlit dashboard reading the SQLite file
+  dashboard.py     # Streamlit entry - st.navigation over the two views
+  theme.py         # shared palette + Plotly chrome + formatters
+  erp.py           # read access to the Eurocycles ERP (SQL Server); degrades gracefully
+  views/
+    distributor.py       # the Apollo / Halfords watch (SQLite)
+    management/          # the ERP-backed management view (package, one module per tab)
+      __init__.py        #   render(): connection guard, sidebar, 6 tabs
+      _common.py         #   Ctx + shared money/format helpers
+      overview.py  models.py  customers.py  production.py  supply.py  finance.py
   data/apollo_dashboard.db   # created on first run
 ```
+
+### Management view — connecting to the ERP
+
+Needs `pyodbc` + `sqlalchemy` (in `requirements.txt`) and the *ODBC Driver 17 for
+SQL Server*. Connection string resolution: `st.secrets["erp"]["odbc"]` → env
+`ERP_ODBC` → local default (`(localdb)\MSSQLLocalDB`, `Encrypt=no`). Start the
+instance first: `sqllocaldb start MSSQLLocalDB`.
+
+The **Overview / Models / Customers** tabs need only `eurocycles_db`. Two tabs use
+satellite databases on the same instance and show a "restore it" notice if absent:
+**Supply & cost** → `eurocycles_db_calc` (component price history), **Production**
+→ `eurocycles_label` (serial-label throughput). Restore each the same way as the
+main DB (`RESTORE DATABASE ... WITH MOVE`).
 
 Three independent data sources per distributor:
 
