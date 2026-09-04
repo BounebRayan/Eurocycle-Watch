@@ -1,7 +1,7 @@
 """Management view — the internal picture from the Eurocycles ERP.
 
 Where the Distributor view is one distributor's outward market, this is the
-company's own numbers. Six tabs, one shared sidebar (currency, bikes-only, year
+company's own numbers. Eight tabs, one shared sidebar (currency, bikes-only, year
 range, distributor). `facture ⋈ facture_det ⋈ nomachat` is loaded once here and
 handed to the sales-driven tabs as `scope`; the Production / Supply / Finance
 tabs run their own ERP queries.
@@ -15,7 +15,7 @@ import streamlit as st
 import erp
 from theme import palette
 from ._common import Ctx
-from . import overview, models, customers, production, supply, finance
+from . import actions, overview, models, valuechain, customers, production, supply, finance
 
 
 def _not_connected(msg: str) -> None:
@@ -82,13 +82,18 @@ def render() -> None:
     ctx = Ctx(ccy=ccy, fx=fx, P=P, years=years, yr_lo=int(yr_lo), yr_hi=int(yr_hi),
               dist_label=dist_label, data_end=sales["datf"].max())
 
-    t_over, t_models, t_cust, t_prod, t_supply, t_fin = st.tabs(
-        ["Overview", "Models", "Customers", "Production", "Supply & cost", "Finance"]
+    t_act, t_over, t_models, t_chain, t_cust, t_prod, t_supply, t_fin = st.tabs(
+        ["Actions", "Overview", "Models", "Value chain", "Customers", "Production",
+         "Supply & cost", "Finance"]
     )
+    with t_act:
+        actions.render(scope, ctx)
     with t_over:
         overview.render(scope, ctx)
     with t_models:
         models.render(scope, ctx)
+    with t_chain:
+        valuechain.render(scope, ctx)
     with t_cust:
         customers.render(scope, ctx)
     with t_prod:

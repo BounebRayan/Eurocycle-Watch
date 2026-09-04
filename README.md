@@ -30,12 +30,15 @@ apollo-dashboard/
   dashboard.py     # Streamlit entry - st.navigation over the two views
   theme.py         # shared palette + Plotly chrome + formatters
   erp.py           # read access to the Eurocycles ERP (SQL Server); degrades gracefully
+  crosswalk.py     # joins the scraped shelf to our ERP models - the only module touching both
   views/
     distributor.py       # the Apollo / Halfords watch (SQLite)
     management/          # the ERP-backed management view (package, one module per tab)
-      __init__.py        #   render(): connection guard, sidebar, 6 tabs
+      __init__.py        #   render(): connection guard, sidebar, 8 tabs
       _common.py         #   Ctx + shared money/format helpers
-      overview.py  models.py  customers.py  production.py  supply.py  finance.py
+      actions.py         #   the to-do list: rules over the other tabs' data
+      overview.py  models.py  valuechain.py  customers.py
+      production.py  supply.py  finance.py
   data/apollo_dashboard.db   # created on first run
 ```
 
@@ -46,11 +49,91 @@ SQL Server*. Connection string resolution: `st.secrets["erp"]["odbc"]` → env
 `ERP_ODBC` → local default (`(localdb)\MSSQLLocalDB`, `Encrypt=no`). Start the
 instance first: `sqllocaldb start MSSQLLocalDB`.
 
-The **Overview / Models / Customers** tabs need only `eurocycles_db`. Two tabs use
+The **Actions / Overview / Models / Value chain / Customers** tabs need only `eurocycles_db`. Two tabs use
 satellite databases on the same instance and show a "restore it" notice if absent:
 **Supply & cost** → `eurocycles_db_calc` (component price history), **Production**
 → `eurocycles_label` (serial-label throughput). Restore each the same way as the
 main DB (`RESTORE DATABASE ... WITH MOVE`).
+
+### Actions — the to-do list
+
+`views/management/actions.py` is the landing tab. Every other tab answers "what
+happened"; this one answers "what should someone do on Monday". It runs a fixed
+set of rules over the same data the other tabs chart, keeps only rows breaking a
+threshold, **sizes each in money on a stated basis**, and ranks them. Every block
+names the tab that holds the evidence — this page is an index, not an analysis.
+
+Adding a rule = write a `_rule_*` function returning a `Finding` and add it to
+`RULES`. A rule that finds nothing is dropped silently; a rule that raises shows a
+warning and the rest of the page still renders.
+
+Current rules: models under the 25% target · models sold below build cost · margin
+eroding year on year on steady volume · the Halfords price-review shortlist (from
+the Value chain join) · models still selling into a shelf that no longer lists them
+· production orders left under plan.
+
+Two notes on thresholds, because a to-do list that cries wolf gets ignored:
+
+- Sizing must be a **real DT amount on a stated basis**, never a synthetic score.
+  The Halfords shortlist is sized at bringing a model up to *our own* blended
+  margin — not at taking the retailer's share, which isn't ours to take and would
+  inflate the number wildly.
+- The production rule ages orders against **the data's own latest invoice**, not
+  the wall clock, and deliberately does *not* use `declarationprd.fermee`: only 25
+  of 16,248 orders carry it, all for 1-6 units, so a rule gated on "closed" could
+  never fire however badly the line slipped.
+
+### Value chain — the one tab that reads both sides
+
+`views/management/valuechain.py` is the only place the scraped shelf and the ERP
+meet. It answers "of the price a customer pays in Halfords, how much is our build
+cost, how much do we keep, how much does Halfords keep?" — per bike, in £, ex-VAT.
+
+**The join** (`crosswalk.py`) is by **model name**, narrowed by e-bike flag and
+wheel size, because no identifier is shared between the two systems:
+
+| | Halfords listing | Our article |
+|---|---|---|
+| name | first word after *Apollo* | `libnach`, less the `A - ` brand initial, an e-bike's leading `e`, and a `NEW` season marker |
+| e-bike | *Electric* in the title, or the electric-bikes category | `nomachat.ebike` |
+| wheel | `24" Wheel` in the title (adult bikes are frame-sized and give none) | decoded from `codnach` |
+
+`codnach` turns out to be structured for this customer — `<prefix><YY><wheel><serial>`,
+so `HA 2427813` is season 2024, 27.5" wheel, and `HA EB252750` is a 2025 e-bike. It
+parses on 100 % of Halfords bike rows, the `EB` prefix matches `ebike = 1` exactly,
+and its wheel beats parsing `modnach` (whose `40x16T` is a sprocket, not a wheel).
+
+The grain is the **match group** — the model as the shelf presents it. Halfords
+lists one bike once per colourway and we hold one article per frame size per
+season, so both sides are folded up before they meet, and every article is claimed
+by at most one group so units can't be double-counted.
+
+Currently this covers **~98 % of the Apollo bikes we invoice Halfords**. Apollo is
+~82 % of our Halfords volume; the rest is Carrera, Indi and Trax, which an
+Apollo-only shelf scrape can't see. Both sides' leftovers are shown rather than
+dropped — a listing we can't match is shelf space we don't supply, and a model we
+sell that no listing claims is a delisting.
+
+Two caveats worth knowing:
+
+- **No GBP rate exists in the ERP** (Halfords is invoiced in USD), so the tab
+  carries its own `DT per £1` control. Its default is the ERP's live USD rate times
+  the `USD_PER_GBP` constant in `valuechain.py` — the only number on the page not
+  traceable to a source system.
+- **`nomachat.gencodnach` holds an EAN on most Halfords models, but Halfords
+  publishes no GTIN to match it against.** Checked and ruled out (2026-09-04):
+  the Bloomreach search API returns none however wide the `fl` field list, the
+  product page carries no `ld+json` GTIN and no 13-digit EAN anywhere in its HTML,
+  and the `shopper-products` payload the page itself fetches has ~90 `c_` custom
+  attributes but no `ean` / `upc` / `gtin`. An exact-key join is not available.
+  What that payload *does* carry is better for narrowing: `c_wheelsize`,
+  `c_gender`, `c_framematerial`, `c_braketype`, `c_suspension`, `c_numberofgears`
+  and `c_rearderailleur` — which are the very tokens `modnach` is built from
+  (`27.5x17 H.TAIL ALLOY D.DISC MEN 21SP TY300 REVO`), plus `variants[]` with a
+  productId per frame size. Capturing those once per pid would let the 25 groups
+  that currently match on name alone match on spec too. It needs the
+  Akamai-fronted browser path, but unlike price these attributes are static, so
+  an opportunistic capture that succeeds occasionally fills in permanently.
 
 Three independent data sources per distributor:
 
