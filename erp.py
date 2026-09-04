@@ -508,3 +508,55 @@ def load_monthly_billings(start_year: int = 2019) -> pd.DataFrame:
     """, start=f"{start_year}-01-01")
     df["month"] = pd.to_datetime(df["month"])
     return df.sort_values("month")
+
+
+# ------------------------------------------------------ customer models ---
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_customer_models(codcust: int) -> pd.DataFrame:
+    """Every bike model on `nomachat` designed for one customer, with the
+    structure decoded out of `codnach`.
+
+    `codnach` is free text (§4 of the findings) but for this customer's models
+    it is laid down to a consistent shape — `<prefix><YY><wheel><serial>`, e.g.
+    `HA 2427813` = 2024 season, 27.5" wheel, serial 813; `HA EB252750` = 2025,
+    27.5", e-bike. Verified: it parses on 100 % of Halfords bike rows, the `EB`
+    prefix matches `ebike = 1` exactly, and the decoded wheel agrees with the
+    `modnach` text wherever that text is a wheel at all — the 7 % that disagree
+    are `modnach` sprocket counts (`40x16T`), not wheels. So the code is the
+    better source for both.
+
+    `season_yr` is the model year the code carries, not a sales date."""
+    df = _q("""
+        SELECT codnach AS article, libnach, modnach, brandnach, gencodnach,
+               ebike, isBike, isArchived
+        FROM nomachat
+        WHERE TRY_CONVERT(float, cusnach) = :cust AND isBike = 1
+    """, cust=codcust)
+    for c in ("libnach", "modnach", "brandnach"):
+        df[c] = df[c].fillna("").str.strip()
+    df["ebike"] = df["ebike"].fillna(0).astype(int)
+    df["isArchived"] = df["isArchived"].fillna(0).astype(int)
+
+    parts = df["article"].map(_decode_codnach)
+    df["code_prefix"] = [p[0] for p in parts]
+    df["season_yr"] = [p[1] for p in parts]
+    df["wheel_in"] = [p[2] for p in parts]
+    return df
+
+
+# Wheel sizes the code's third/fourth digit is allowed to mean. 27 is 27.5"
+# and 28 is 700c; both are kept as the integer the code carries so they compare
+# straight against a retail title's `27.5"` / `28"`.
+_WHEEL_CODES = {10, 12, 14, 16, 18, 20, 24, 26, 27, 28, 29}
+_CODNACH_RE = re.compile(r"^([A-Z]+)(\d{2})(\d{2})(\d{2,4})$")
+
+
+def _decode_codnach(code: str) -> tuple[str | None, int | None, int | None]:
+    """`'HA 2427813'` -> `('HA', 2024, 27, ...)`. `(None, None, None)` when the
+    code doesn't follow the convention — always possible, it's free text."""
+    s = re.sub(r"[\s\-/]", "", (code or "").upper())
+    m = _CODNACH_RE.match(s)
+    if not m:
+        return (None, None, None)
+    prefix, yy, ww = m.group(1), int(m.group(2)), int(m.group(3))
+    return (prefix, 2000 + yy, ww if ww in _WHEEL_CODES else None)
