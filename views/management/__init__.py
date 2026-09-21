@@ -1,7 +1,7 @@
 """Management view — the internal picture from the Eurocycles ERP.
 
 Where the Distributor view is one distributor's outward market, this is the
-company's own numbers. Eleven tabs, one shared sidebar (currency, bikes-only, year
+company's own numbers. Twelve tabs, one shared sidebar (currency, bikes-only, year
 range, distributor). `facture ⋈ facture_det ⋈ nomachat` is loaded once here and
 handed to the sales-driven tabs as `scope`; the Production / Supply / Finance
 tabs run their own ERP queries.
@@ -17,7 +17,7 @@ import i18n
 from theme import palette
 from ._common import Ctx
 from . import (actions, overview, models, valuechain, customers, production, supply,
-               finance, activity, landed, requote)
+               finance, activity, landed, requote, exchange)
 
 
 def _not_connected(msg: str) -> None:
@@ -96,10 +96,10 @@ def render() -> None:
               dist_label=dist_label, data_end=sales["datf"].max(), lang=lang)
 
     (t_act, t_over, t_activity, t_models, t_chain, t_cust, t_prod, t_landed,
-     t_requote, t_supply, t_fin) = st.tabs(
+     t_requote, t_fx, t_supply, t_fin) = st.tabs(
         [tr("Actions"), tr("Overview"), tr("Activity report"), tr("Models"),
          tr("Value chain"), tr("Customers"), tr("Production"), tr("Landed cost"),
-         tr("Re-quotation"), tr("Supply & cost"), tr("Finance")]
+         tr("Re-quotation"), tr("Exchange rate"), tr("Supply & cost"), tr("Finance")]
     )
     with t_act:
         actions.render(scope, ctx)
@@ -119,6 +119,8 @@ def render() -> None:
         landed.render(ctx)
     with t_requote:
         requote.render(ctx)
+    with t_fx:
+        exchange.render(ctx)
     with t_supply:
         supply.render(scope, ctx)
     with t_fin:

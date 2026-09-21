@@ -7,7 +7,7 @@ Two views, one app (`streamlit run dashboard.py`):
   (new/delisted models), and — best-effort — stock status and ratings. Reads the
   committed SQLite snapshot; works anywhere.
 - **Management** — the internal cost / margin / production picture from the
-  Eurocycles ERP (SQL Server), in six tabs: **Overview** (company scoreboard),
+  Eurocycles ERP (SQL Server), in twelve tabs: **Overview** (company scoreboard),
   **Models** (best/worst, cost vs sale price per bike, margin drift), **Customers**
   (per-distributor scorecard + shipment plan vs actual), **Production** (plan
   attainment, label throughput, line-flow time), **Supply & cost** (component
@@ -34,11 +34,12 @@ apollo-dashboard/
   views/
     distributor.py       # the Apollo / Halfords watch (SQLite)
     management/          # the ERP-backed management view (package, one module per tab)
-      __init__.py        #   render(): connection guard, sidebar, 8 tabs
+      __init__.py        #   render(): connection guard, sidebar, 12 tabs
       _common.py         #   Ctx + shared money/format helpers
       actions.py         #   the to-do list: rules over the other tabs' data
       overview.py  models.py  valuechain.py  customers.py
       production.py  supply.py  finance.py
+      activity.py  landed.py  requote.py  exchange.py
   data/apollo_dashboard.db   # created on first run
 ```
 
@@ -49,7 +50,7 @@ SQL Server*. Connection string resolution: `st.secrets["erp"]["odbc"]` → env
 `ERP_ODBC` → local default (`SERVER=EC-RAYAN`, `Encrypt=no`) — the machine's own
 `MSSQLSERVER` Windows service, always running, no instance to start by hand.
 
-The **Actions / Overview / Activity report / Models / Value chain / Customers / Landed cost / Re-quotation** tabs need only `eurocycles_db`. Three tabs use
+The **Actions / Overview / Activity report / Models / Value chain / Customers / Landed cost / Re-quotation / Exchange rate** tabs need only `eurocycles_db`. Three tabs use
 satellite databases on the same instance and degrade gracefully if one is absent:
 **Supply & cost** → `eurocycles_db_calc` (component price history), **Production**
 → `eurocycles_label` (serial-label throughput), **Models' detail dialog** →
@@ -149,6 +150,36 @@ on the like-for-like one.
 Parity is pinned by running the GPAO's own query string character for character
 and matching it per model. Six defects in total are reproduced and written up in
 **`docs/gpao-parity.md`** §6-7.
+
+
+### Exchange rate — separating the dinar from the commercial story
+
+Every sale is invoiced in EUR or USD; build cost (`facture_det.mat`) is stored in
+dinar. So the two sides of a margin don't move together when the rate does, and a
+model sold at an unchanged foreign price to the same customer in the same volume
+still loses dinar margin. The **Exchange rate** tab ports `frmExchangeRate` and,
+more usefully, sizes that effect.
+
+It mattered because the Actions tab's margin-erosion rule didn't know about it.
+The rule told the reader that steady volume "leaves price or cost"; on 2025→2026
+a third of the money it was sizing was neither. Holding the rate constant across
+both years:
+
+| erosion list, 2025→2026 | models | sized at |
+|---|---:|---:|
+| Before (`drop_pp ≥ 3 pp`) | 23 | DT 559,298 |
+| After (`drop_pp_ex_fx ≥ 3 pp`) | **16** | **DT 303,302** |
+
+Seven models came off: their whole decline was the dinar. Book-wide the rate
+moved reported margin **+0.85 pp**, worth DT 236,150. The rule now triggers on
+the ex-FX figure and shows the FX column beside the booked one.
+
+The GPAO screen itself has a defect worth knowing: its twelve monthly `Ecart`
+columns and the TOTAL band beside them measure different things — month-on-month
+movements versus the year revalued closing-against-opening — so the columns don't
+sum to the total printed next to them. On 2026 they're 4× apart on USD and
+opposite in sign on EUR. Both readings are shown rather than reconciled. See
+`docs/gpao-parity.md` §8.
 
 ### Profitability — the finance pack
 
@@ -254,9 +285,9 @@ Adding a rule = write a `_rule_*` function returning a `Finding` and add it to
 warning and the rest of the page still renders.
 
 Current rules: models under the 25% target · models sold below build cost · margin
-eroding year on year on steady volume · the Halfords price-review shortlist (from
-the Value chain join) · models still selling into a shelf that no longer lists them
-· production orders left under plan.
+eroding year on year on steady volume, net of exchange rate · the Halfords
+price-review shortlist (from the Value chain join) · models still selling into a
+shelf that no longer lists them · production orders left under plan.
 
 Two notes on thresholds, because a to-do list that cries wolf gets ignored:
 
@@ -264,6 +295,11 @@ Two notes on thresholds, because a to-do list that cries wolf gets ignored:
   The Halfords shortlist is sized at bringing a model up to *our own* blended
   margin — not at taking the retailer's share, which isn't ours to take and would
   inflate the number wildly.
+- The erosion rule triggers on the margin drop **after the exchange rate is held
+  constant**, because sales are invoiced in EUR/USD while build cost is in dinar,
+  so the rate moves reported margin on its own. It was a third of what the rule
+  used to size. The booked drop and the FX slice are both shown beside it — see
+  the Exchange rate section above.
 - The production rule ages orders against **the data's own latest invoice**, not
   the wall clock, and deliberately does *not* use `declarationprd.fermee`: only 25
   of 16,248 orders carry it, all for 1-6 units, so a rule gated on "closed" could

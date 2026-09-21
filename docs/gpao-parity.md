@@ -1,12 +1,13 @@
 # GPAO parity
 
-_How the dashboard's **Activity report**, **Landed cost** and **Re-quotation**
-tabs relate to the Eurocycles GPAO: what ties exactly, what doesn't and why, and
-the thirteen places the GPAO's own arithmetic does not hold up._
+_How the dashboard's **Activity report**, **Landed cost**, **Re-quotation** and
+**Exchange rate** tabs relate to the Eurocycles GPAO: what ties exactly, what
+doesn't and why, and the seventeen places the GPAO's own arithmetic does not
+hold up._
 
 Ported so far: `frmActiviteComp1` (§1-4), `frmEtatOFValorises` and
-`frmEtatOFValorisesTrans` (§5), `frmAnalyseCoutMatNC` (§6) and
-`frmConsultPrixNC` (§7). Still outstanding: §8.
+`frmEtatOFValorisesTrans` (§5), `frmAnalyseCoutMatNC` (§6),
+`frmConsultPrixNC` (§7) and `frmExchangeRate` (§8). Still outstanding: §9.
 
 Date of this pass: 2026-09-21.
 GPAO source: `d:\Source code\Eurocycles\Eurocycles.sln` (VB.NET, DevExpress).
@@ -577,16 +578,158 @@ authoring screen's, because that is the figure a human approved.
 
 ---
 
-## 8. Not yet ported
+## 8. Exchange-rate variation — `frmExchangeRate`
 
-Three passes have now ported `frmActiviteComp1`, the two valued-order screens,
-`frmAnalyseCoutMatNC` and `frmConsultPrixNC`. The GPAO has substantially more
-management reporting that the dashboard does not yet carry. The largest
-remaining blocks, in rough order of likely value:
+_Added in the fourth pass. Tab: **Exchange rate**. Module: `gpao_exchange.py`._
+
+### Why this one came next
+
+§6 prices both legs of the re-quotation at today's rate precisely so the
+comparison isolates price movement rather than FX. The Actions tab had no such
+protection. Its erosion rule reads booked invoices at booked rates and told the
+reader that steady volume "leaves price or cost" — but every sale Eurocycles
+makes is invoiced in EUR or USD (DT invoices are **5 of 2,213** over 2024-26)
+while `facture_det.mat`, the cost side, is stored in dinar. `line_rev_dt` is
+`qte · prx · facture.cours`; `line_cogs_dt` is `mat`. The two sides of the
+margin do not move together when the rate does, so a model sold at an unchanged
+foreign price, to the same customer, in the same volume, still loses dinar
+margin. Measured on 2025→2026, that was **a third of the money the rule was
+sizing**.
+
+### What the screen does
+
+Take every non-cancelled EUR/USD invoice in a window, group by customer ×
+currency × calendar month, and revalue the same foreign-currency total twice:
+
+```
+Cours (2) = the month's own average devisesc rate
+Cours (1) = the previous month's average        (January: the 31/12 rate)
+Ecart     = TotalDev · Cours(2)  -  TotalDev · Cours(1)
+```
+
+Volume and price are identical on both legs, so the whole `Ecart` is exchange
+rate. Two grids — by customer and by currency — plus a TOTAL band that revalues
+the year at the closing rate against the opening one. Filters are
+`facture.flag <> 1`, `dev IN ('EUR','USD')` and the `WITHOUT COMMERCIAL VALUE`
+exclusion, which this screen applies unconditionally — unlike §1's, see defect 1.
+
+### Parity
+
+No export for this screen either, so parity is pinned as §5-§7 were: **the
+GPAO's own SQL, run character for character**. `_gpao_sql` holds the query
+`GetListAchatsALL` builds; `_ecart` reproduces the VB's per-cell arithmetic.
+`tests/test_gpao_exchange.py` ties the turnover to the invoice book, the monthly
+rate to `SUM(x)/COUNT(x)` over `devisesc` and January to the 31/12 scalar, and
+checks the two grids agree once the customer is summed out.
+
+| 2026 | EUR | USD |
+|---|---:|---:|
+| Turnover | 3,872,750 € | 9,874,577 $ |
+| Sum of the 12 monthly `Ecart` columns | DT 10,295 | DT 86,767 |
+| TOTAL band `Ecart` | **DT −18,589** | **DT 356,472** |
+
+The last two rows are the same grid disagreeing with itself. See defect 14.
+
+### Four more defects
+
+**14. The monthly columns and the TOTAL band measure different things.** Each
+month's `Ecart` compares that month's sales against the *previous month's* rate
+— twelve independent month-on-month movements. The TOTAL band beside them
+revalues the **whole year's** volume at the closing rate against the opening
+one. Summing the columns does not give the total the grid reports next to them:
+on 2026 the two readings are 4× apart on USD and **opposite in sign on EUR**, so
+a reader who totals the row gets a number the screen itself contradicts. Both
+readings are reproduced and shown side by side rather than reconciled, because
+neither is wrong on its own terms — they answer different questions, and the
+screen never says which one it is answering.
+
+**15. Month columns are mislabelled unless the window starts in January.** The
+grid captions its bands by walking forward from the start date
+(`datedeb.AddMonths(j)`) while the data is filed by calendar month
+(`DATEPART(Month, datf)`). Start the window in March and March's figures land in
+the column captioned MAY, with the first two columns empty. The screen opens on
+1 January, so the default view is correct and this only fires when someone moves
+the date — which the screen invites, since the date pickers are its main control.
+
+**16. Neither leg uses the rate the invoice was booked at.** Both legs are
+priced from monthly averages of `devisesc`, while `facture.cours` — the rate
+every revenue figure in the GPAO and in this dashboard is computed from — sits
+on the invoice itself. They track closely (median gap **−0.12 %**) but **94 of
+1,253** invoices sit more than 1 % apart, so this screen's dinar totals cannot be
+reconciled against any other screen's revenue. This is why `fx_split` does not
+use this screen's arithmetic at all.
+
+**17. A month with no quoted rate is priced at zero, not skipped.** The rate
+subqueries end `ELSE 0`, so a gap in `devisesc` would revalue that month's sales
+at nothing and report the entire turnover as exchange variation — while the
+`Ecart (%)` guard returns a tidy 0 % beside it. `devisesc` carries a row for
+every day of 2024-26, so this is latent here rather than measured.
+
+One thing that looks like a defect and isn't: the month averages are written
+`SUM(x)/COUNT(x)` rather than `AVG(x)`. SQL Server rejects a correlated
+aggregate spanning more than one outer column, which is what `AVG` over a `CASE`
+on `F.dev` would be. The division is the workaround, and the port keeps it.
+
+### The correction — `fx_split`
+
+The tab leads with this rather than with the screen. It reprices **both** years
+at one rate — the prior year's turnover-weighted booked rate — line by line in
+each line's own currency, so a model that moved between EUR and USD is handled
+by construction rather than excluded:
+
+```
+rev_const[y]    = SUM(qte · prx · rate_prev[line currency])   for y in (prev, yr)
+margin_const[y] = 1 − cogs[y] / rev_const[y]
+drop_pp_ex_fx   = margin_const[prev] − margin_const[yr]
+fx_pp           = drop_pp − drop_pp_ex_fx
+```
+
+Repricing only `yr` and leaving `prev` at its reported margin looks equivalent
+and is not: `line_rev_dt` uses each *invoice's* own `cours`, so a model whose
+sales cluster in months when the rate ran above the year's average carries that
+timing in its reported margin. `HA 2426011` is the case in point — its 2025
+sales were booked at an average 2.9266 against a book-wide 2.9940, so the
+one-sided reading scored it at 1.83 pp of FX where the honest figure is 0.39 pp.
+Holding one rate across both years cancels it, and makes the split return
+exactly zero when a year is compared against itself — which is the test that
+catches the mistake.
+
+NaN is a real answer here. A model can appear in a year with credit notes and no
+units: `BF 2424260` has two 2025 lines totalling zero units, DT 104 of revenue
+and *negative* COGS, which reports as a 115 % margin and a 75 pp "drop".
+Constant-rate revenue is then zero and the margin undefined, so the split
+returns NaN rather than a number that would rank near the top of any list sorted
+by damage.
+
+### What it changed on the Actions tab
+
+Book-wide, across the 433 models sold in both 2025 and 2026, the rate moved
+reported margin by **+0.85 pp**, worth **DT 236,150**. On the erosion rule's own
+scope — 47 models over the 200-unit floor in both years:
+
+| | models | sized at |
+|---|---:|---:|
+| Rule as it stood (`drop_pp ≥ 3 pp`) | 23 | DT 559,298 |
+| Rule now (`drop_pp_ex_fx ≥ 3 pp`) | **16** | **DT 303,302** |
+
+Seven models came off the list: their whole decline was the dinar. None joined,
+though the mechanism is symmetric and the rule would pick up a model whose real
+erosion a favourable rate was masking. The `why` text now names the FX figure it
+removed, and the table carries `of which FX` and `Ex-FX` columns beside the
+booked change, so the correction sits next to the GPAO's reading rather than
+replacing it.
+
+---
+
+## 9. Not yet ported
+
+Four passes have now ported `frmActiviteComp1`, the two valued-order screens,
+`frmAnalyseCoutMatNC`, `frmConsultPrixNC` and `frmExchangeRate`. The GPAO has
+substantially more management reporting that the dashboard does not yet carry.
+The largest remaining blocks, in rough order of likely value:
 
 | GPAO screen | What it adds |
 |---|---|
-| `frmExchangeRate` | Exchange-rate variation and its effect on cost — the natural next one, since §6 deliberately holds FX constant to isolate price movement |
 | `frmTabAnCAF` / `frmTabAnCAFFour` | Annual CAF tables, customer and supplier |
 | `frmTabCompAnnuel` / `…Grp` | Multi-year comparative tables, by group |
 | `frmAnalyseStock` / `frmStockTheorique` | Stock analysis, theoretical stock by group |
@@ -604,7 +747,7 @@ per-currency totals are also summed with the FX conversion commented out. The
 component-level question it answers is better served by `load_requote_lines`,
 which §6 ports instead.
 
-### One correction to §8 as it stood before this pass
+### One correction to §9 as it stood before this pass
 
 The previous edition of this table described `frmConsultPrixNC` as "the stored
 price list per model (`prxnom` / `tarif_det`)". That was wrong on both counts.

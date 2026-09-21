@@ -27,6 +27,7 @@ import streamlit as st
 
 import crosswalk
 import erp
+import gpao_exchange
 from ._common import Ctx, TILE_H, money, tile, to_disp
 from . import valuechain
 
@@ -208,37 +209,64 @@ def _rule_loss_making(scope: pd.DataFrame, ctx: Ctx) -> Finding | None:
 
 
 def _rule_erosion(scope: pd.DataFrame, ctx: Ctx) -> Finding | None:
-    """Models whose margin fell year on year on steady volume."""
+    """Models whose margin fell year on year on steady volume — net of FX.
+
+    The rule used to read the whole drop as commercial and send the reader to
+    the Supply & cost tab for the cause. That was wrong for a book invoiced
+    almost entirely in EUR and USD: `line_rev_dt` is translated at the invoice's
+    own rate while `line_cogs_dt` is already in dinar, so a rate move shifts the
+    margin on its own. On 2025→2026 that was a third of the money this rule was
+    sizing, and it stood every USD model up by roughly 1.5 pp against a 3 pp
+    threshold. `gpao_exchange.fx_split` separates the two; the list now triggers
+    on what is left once the rate is held constant, and carries the FX column so
+    the reader can see what was taken out."""
     yr, prev = _latest_years(scope)
     if prev is None:
         return None
-    cur, old = _per_model_year(scope, yr), _per_model_year(scope, prev)
-    m = cur.merge(old[["article", "margin_pct", "units"]], on="article",
-                  suffixes=("", "_prev"))
-    m = m[(m["units"] >= MIN_UNITS_MARGIN) & (m["units_prev"] >= MIN_UNITS_MARGIN)]
-    m["drop_pp"] = m["margin_pct_prev"] - m["margin_pct"]
-    bad = m[m["drop_pp"] >= EROSION_PP].copy()
+    split = gpao_exchange.fx_split(scope, yr, prev, group="article")
+    if split.empty:
+        return None
+    m = split[(split["units"] >= MIN_UNITS_MARGIN)
+              & (split["units_prev"] >= MIN_UNITS_MARGIN)].copy()
+    # Triggering on the ex-FX drop cuts both ways: it drops models whose whole
+    # decline was the dinar, and it picks up ones a favourable rate had been
+    # masking.
+    bad = m[m["drop_pp_ex_fx"] >= EROSION_PP].copy()
     if bad.empty:
         return None
+    labels = _per_model_year(scope, yr)[["article", "model", "brand"]]
+    bad = bad.merge(labels, on="article", how="left")
     # What holding last year's margin rate would have been worth on this year's
-    # revenue — the cost of the drift, not of the whole gap to target.
-    bad["cost_of_drift"] = bad["drop_pp"] / 100 * bad["revenue"]
+    # revenue — the cost of the drift, not of the whole gap to target, and not
+    # of the translation.
+    bad["cost_of_drift"] = bad["drop_pp_ex_fx"] / 100 * bad["rev"]
     bad = bad.sort_values("cost_of_drift", ascending=False)
+    fx_removed = float(bad["fx_dt"].sum())
     out = bad[["article", "model", "brand", "units", "margin_pct_prev", "margin_pct",
-               "drop_pp", "cost_of_drift"]].copy()
+               "drop_pp", "fx_pp", "drop_pp_ex_fx", "cost_of_drift"]].copy()
     out["cost_of_drift"] = to_disp(out["cost_of_drift"], ctx)
     return Finding(
         key="erosion", title=f"Margin eroding — {prev} to {yr}",
         why=f"Models that held their volume but lost at least {EROSION_PP:.0f} points of margin "
-            "year on year. Steady volume rules out mix as the explanation, which leaves price "
-            "or cost — the Supply & cost tab shows which components moved.",
-        basis=f"{yr} revenue × the points of margin lost since {prev}",
+            "year on year **after the exchange rate is held constant**. Steady volume rules out "
+            "mix, and the FX column takes out translation, which leaves price or cost — the "
+            "Supply & cost tab shows which components moved. Sales are invoiced in EUR and USD "
+            "while build cost is stored in dinar, so the rate alone moves the margin: it "
+            f"accounts for {money(fx_removed, ctx)} across these models, which is **not** "
+            "included in the figure at stake. The Exchange rate tab sizes it in full.",
+        basis=f"{yr} revenue × the points of margin lost since {prev}, net of FX",
         tab="Models", items=out.head(25), value_dt=float(bad["cost_of_drift"].sum()),
         columns={"article": "Code", "model": "Model", "brand": "Brand",
                  "units": st.column_config.NumberColumn("Units", format="%d"),
                  "margin_pct_prev": st.column_config.NumberColumn(f"{prev}", format="%.1f%%"),
                  "margin_pct": st.column_config.NumberColumn(f"{yr}", format="%.1f%%"),
-                 "drop_pp": st.column_config.NumberColumn("Change", format="%.1f pp"),
+                 "drop_pp": st.column_config.NumberColumn("Change", format="%.1f pp",
+                                                          help="As booked, FX included."),
+                 "fx_pp": st.column_config.NumberColumn("of which FX", format="%.1f pp",
+                                                        help="Points of the change explained by "
+                                                             "the exchange rate alone."),
+                 "drop_pp_ex_fx": st.column_config.NumberColumn("Ex-FX", format="%.1f pp",
+                                                                help="What the rule triggers on."),
                  "cost_of_drift": _money_col(f"Cost of drift ({ctx.ccy})")})
 
 
