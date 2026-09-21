@@ -13,8 +13,8 @@ Two views, one app (`streamlit run dashboard.py`):
   attainment, label throughput, line-flow time), **Supply & cost** (component
   price inflation, supplier spend, quality claims, PO pipeline), **Finance**
   (billings vs collections, commission cost). **Local-only** — the ERP is on
-  `(localdb)\MSSQLLocalDB` and isn't reachable from Streamlit Cloud, so the view
-  shows an explainer there. See
+  the office machine's own SQL Server instance (`EC-RAYAN`) and isn't reachable
+  from Streamlit Cloud, so the view shows an explainer there. See
   [`docs/eurocycles-erp-findings.md`](docs/eurocycles-erp-findings.md) (§12b for
   what each tab supports).
 
@@ -46,14 +46,200 @@ apollo-dashboard/
 
 Needs `pyodbc` + `sqlalchemy` (in `requirements.txt`) and the *ODBC Driver 17 for
 SQL Server*. Connection string resolution: `st.secrets["erp"]["odbc"]` → env
-`ERP_ODBC` → local default (`(localdb)\MSSQLLocalDB`, `Encrypt=no`). Start the
-instance first: `sqllocaldb start MSSQLLocalDB`.
+`ERP_ODBC` → local default (`SERVER=EC-RAYAN`, `Encrypt=no`) — the machine's own
+`MSSQLSERVER` Windows service, always running, no instance to start by hand.
 
-The **Actions / Overview / Models / Value chain / Customers** tabs need only `eurocycles_db`. Two tabs use
-satellite databases on the same instance and show a "restore it" notice if absent:
+The **Actions / Overview / Activity report / Models / Value chain / Customers / Landed cost / Re-quotation** tabs need only `eurocycles_db`. Three tabs use
+satellite databases on the same instance and degrade gracefully if one is absent:
 **Supply & cost** → `eurocycles_db_calc` (component price history), **Production**
-→ `eurocycles_label` (serial-label throughput). Restore each the same way as the
-main DB (`RESTORE DATABASE ... WITH MOVE`).
+→ `eurocycles_label` (serial-label throughput), **Models' detail dialog** →
+`eurocycles_db_images` (product photos — shows "no photo on file" per model rather
+than a notice, since most models don't have one anyway). Restore each the same way
+as the main DB (`RESTORE DATABASE ... WITH MOVE`).
+
+The **Activity report**'s three consumption sections also read `eurocycles_db_calc`.
+In the current restore that database ends **2026-06-30** while the sales data runs
+to 2026-08-19, so those three sections under-report any window past June and the
+tab says so. Everything else in that tab needs only `eurocycles_db`.
+
+### Activity report — parity with the GPAO
+
+The Eurocycles GPAO (the VB.NET ERP client) carries its own management reporting.
+Its flagship screen — `10-Financier/05-Direction generale/frmActiviteComp1.vb`,
+*"Activities comparatives"* — is what produced
+`data/finance/erp-report-ytd-2026-09-21.xlsx`, and the **Activity report** tab is a
+query-for-query port of it: nineteen sections comparing a date window against the
+same window one year earlier, across sales, customer orders, purchasing, component
+consumption and freight.
+
+**15 of the 18 sections the GPAO exports tie to its spreadsheet to the cent.**
+`tests/test_gpao_activity.py` reads that committed export and asserts it, so a
+later tidy-up of a join can't quietly break parity. The three that don't tie are
+the consumption sections, and the cause is the short `eurocycles_db_calc` restore
+above — the GPAO's own SQL, run unchanged, returns our number, not the
+spreadsheet's.
+
+The port keeps the GPAO's quirks on purpose, including four places its own
+arithmetic doesn't hold up (three revenue totals for one period; an average price
+that divides two different populations; a percentage rounded before it's divided).
+Those are reproduced so the numbers still tie, and flagged on the page and in
+**`docs/gpao-parity.md`**, which carries the evidence and the corrected figures.
+The GPAO source itself is read-only for this project and was not modified.
+
+### Landed cost — putting inbound freight back
+
+Every other margin figure here is **margin over `facture_det.mat`** — standard
+material cost, which carries no packaging, no paint and no inbound freight. The
+GPAO's own answer is `facturef_det.coef`: the ancillary charges on a supplier
+invoice (transit, handling, insurance, duty, freight and four more), spread per
+unit. `frmEtatOFValorisesTrans.vb` adds it to each production order's bill of
+materials, and the **Landed cost** tab ports that.
+
+It closes most of a gap the earlier pass couldn't explain. Over Jan–Jun 2026:
+
+| | |
+|---|---:|
+| Margin over material (what the Overview shows) | 31.9 % |
+| less inbound freight | −4.6 pp |
+| **Margin after freight** | **27.3 %** |
+| Accounting gross margin, from the P&L pack | 26.9 % |
+
+Parity is pinned against the ERP's own stored values rather than a spreadsheet:
+`coef` is written into `facturef_det` by the GPAO, and recomputing it from the
+charge columns reproduces **98.7 % of rows exactly**. The GPAO does its as-of
+lookups as correlated subqueries (351 s for a six-month window); the same rule via
+`merge_asof` takes 1.6 s.
+
+Three more defects live here, including one where the coefficient formula
+subtracts a *percentage* from an *amount* and leaves 41 supplier invoices with
+negative freight. All are reproduced, flagged on the page, and written up in
+**`docs/gpao-parity.md`** §5.
+
+### Re-quotation — a sell price worth trusting
+
+Landed cost says what a bike costs. The **Re-quotation** tab says what it *would*
+cost to build at today's component prices, and what the price list wants for it.
+It ports `frmAnalyseCoutMatNC` (walk each model's bill of materials twice — once
+at the price it was costed at, once at each part's current order price) and
+`frmConsultPrixNC` (the per-model costing sheet in `costing_nc`, and the FOB
+price derived from it).
+
+The second half answers something `docs/eurocycles-erp-findings.md` §4 left open:
+the dashboard had no trustworthy sell price, because `nomachat.prxnach` is stale.
+Against realised average selling price for 2026, over the 283 models carrying
+both figures:
+
+| | median abs. error | within ±10 % |
+|---|---:|---:|
+| Price derived from `costing_nc` | **7.1 %** | **60 %** |
+| `nomachat.prxnach` | 35.3 % | 2 % |
+
+Its weakness is reach, not accuracy — only 45 % of models invoiced this year have
+a costing sheet.
+
+**The re-quotation itself has a defect worth knowing before you read it.** A
+component whose current price was never filled in is scored at **zero**, so it
+vanishes from the new quotation while keeping its full weight in the old cost —
+turning a gap in the part master into an apparent saving. Over 2026 that is 3.0 %
+of components, and it is enough to flip the answer on **126 of 749 models**: the
+GPAO reports material cost falling 1.94 %, like for like it fell 0.36 %. The tab
+carries both readings everywhere, and the Actions tab's new re-pricing rule ranks
+on the like-for-like one.
+
+Parity is pinned by running the GPAO's own query string character for character
+and matching it per model. Six defects in total are reproduced and written up in
+**`docs/gpao-parity.md`** §6-7.
+
+### Profitability — the finance pack
+
+The Overview's second block walks **revenue down to net profit**: gross margin,
+each operating-cost section, pre-tax profit, tax, net. It comes from
+[`finance_pack.py`](finance_pack.py) reading the accounting export in
+`data/finance/pl-<year>.xlsx`, **not** from the ERP — which holds none of those
+costs except salaries.
+
+To refresh it, drop a newer export into `data/finance/`. The sheet carries no
+year inside it (only month names), so **the year must be in the filename**;
+anything else is ignored rather than dated wrong.
+
+Two things worth knowing before reading the numbers:
+
+- **Section totals come from the pack's own `999` rows, never from summing the
+  member lines.** Four cost-of-sales lines are month-end *balances* (raw and
+  finished-goods stock), so totalling the section's members gives 825M against
+  a real 23.8M. `tests/test_finance_pack.py` guards this, and also checks our
+  revenue→net walk still lands on the pack's printed `P.B.I.T` / `Total Net`.
+- **The KPI strip's margin is a different measure** — `revenue − facture_det.mat`,
+  which is material cost only and runs ~5 points above the accounting gross
+  margin. The tile is labelled "Margin over build cost" for that reason, and an
+  expander on the Overview reconciles the two. See docs §12d.
+
+### Language
+
+A **Language** selector sits under **Currency** in the sidebar (English /
+Français). It translates the whole Management view — controls, tab names,
+headings, KPI labels, captions, `help=` tooltips, chart axes and legends, table
+headers and dropdown options. What stays as-is is ERP data: model names, brands,
+countries and column identifiers like `nomachat.cusnach`.
+
+- `t()` / `tf()` live in [`i18n.py`](i18n.py); tabs reach them via `ctx.t()`.
+- The catalogue is [`translations/fr.json`](translations/fr.json), **keyed by the
+  English source string**, so call sites read as what they render and a missing
+  entry falls back to English rather than showing a raw key. It is plain JSON —
+  editable without touching Python if the French wording needs a tweak.
+- Strings with numbers are templates with named placeholders
+  (`ctx.tf("{lo}–{hi} cumulative. Top {n}.", …)`) so French can reorder the
+  sentence.
+- `i18n.N_()` marks a string defined away from where it renders (a module-level
+  table, an `erp` data value) — it returns the string unchanged but keeps it
+  visible to the extractor.
+- Dropdowns pass `format_func=ctx.t`, so the option *values* stay English and
+  keep driving the logic while only the display translates.
+
+`tests/test_i18n.py` fails if any UI string lacks a translation, if a
+translation drops a placeholder, or if the catalogue holds entries nothing
+uses — run it after adding UI text. Add a language by dropping
+`translations/<code>.json` beside `fr.json` and listing it in `i18n.LANGUAGES`.
+
+### Model detail — one bike's full profile
+
+A dialog opened from the **Models** tab: search or pick a model, hit **View
+details**. Shows its photo (`eurocycles_db_images`, when there is one), identity
+(brand, distributor, decoded season/wheel from `codnach`), the same economics
+tiles as the rest of the tab for the selected range, a year-by-year revenue/
+margin/units chart, every other season's article code for the same bike (its
+`design_key` family — see the margin bridge note below for why that grouping
+matters), and production plan-vs-declared for the exact code.
+
+### Margin bridge — why the margin line moved
+
+At the bottom of the **Overview** tab. Decomposes the year-on-year change in gross
+margin into six buckets, as an **exact identity** — they sum to the change to the
+cent, which is what makes it auditable rather than a story:
+
+| bucket | reading |
+|---|---|
+| volume | sold more or fewer bikes overall |
+| mix | sold a different blend of them, at last year's margins |
+| price | same bikes, different selling price |
+| cost | same bikes, different build cost |
+| new / dropped | the range itself changing |
+
+Price and cost are the two anyone can act on directly. An expander attributes
+price, cost and volume+mix per model (volume and mix can't be split per model —
+the split needs a company-wide average).
+
+Two things it gets right that are easy to get wrong:
+
+- **It groups by `design_key`, not `article`.** `codnach` carries the model year,
+  so the same bike is re-coded every season and grouping by article reports the
+  annual renumbering of the range as models dropped and replaced. At the article
+  grain new+dropped run **6.8x** the size of the actual change; by design, 3.7x.
+  There's a Design/Article toggle so the difference is visible rather than assumed.
+- **It trims both compared years to the same elapsed months** when either is the
+  part year. `_common.like_for_like` only handles the newest pair; the bridge lets
+  you pick any two, so an 8-month 2026 could otherwise land against a full 2023 and
+  the whole gap would show up as `volume`.
 
 ### Actions — the to-do list
 

@@ -13,6 +13,7 @@ import pandas as pd
 import streamlit as st
 
 import erp
+import i18n
 
 TILE_H = 140
 
@@ -27,6 +28,15 @@ class Ctx:
     yr_hi: int
     dist_label: str
     data_end: pd.Timestamp          # newest invoice date in the loaded sales
+    lang: str = i18n.DEFAULT_LANG
+
+    def t(self, s: str) -> str:
+        """Translate a string into the selected language."""
+        return i18n.t(s, self.lang)
+
+    def tf(self, s: str, **kwargs) -> str:
+        """Translate a template, then fill its named placeholders."""
+        return i18n.tf(s, self.lang, **kwargs)
 
     @property
     def rate(self) -> float:
@@ -71,10 +81,10 @@ def partial_year_note(ctx: Ctx) -> str | None:
     if p is None:
         return None
     month = ctx.data_end.strftime("%B")
-    return (f"{p} runs to {ctx.data_end:%d %b %Y}. Year-on-year figures compare "
-            f"January–{month} {p} against January–{month} {p - 1}, so a part year "
-            "isn't measured against a full one. Totals shown elsewhere are the "
-            "full period.")
+    return ctx.tf("{yr} runs to {end}. Year-on-year figures compare January–{month} {yr} "
+                  "against January–{month} {prev}, so a part year isn't measured against "
+                  "a full one. Totals shown elsewhere are the full period.",
+                  yr=p, end=f"{ctx.data_end:%d %b %Y}", month=month, prev=p - 1)
 
 
 def sym(ccy: str) -> str:
@@ -107,7 +117,7 @@ def to_disp(dt_amount, ctx: Ctx):
 # Shown at the top of tabs whose source tables carry no customer or bike/part
 # dimension, so the sidebar's distributor and bikes-only filters can't apply.
 # Without it the reader assumes every tab moves together when they filter.
-UNFILTERED_NOTE = (
+UNFILTERED_NOTE = i18n.N_(
     "**{what} is company-wide.** These figures come from production, purchasing "
     "and cash tables that don't carry a customer or bike/part dimension, so the "
     "**Distributor** and **Bikes only** filters in the sidebar do not apply here. "
@@ -115,19 +125,26 @@ UNFILTERED_NOTE = (
 )
 
 
-def db_notice(db: str, what: str) -> None:
+_DB_NOTICE = i18n.N_(
+    "**{what} needs the `{db}` database**, which isn't attached to this "
+    "SQL Server instance.\n\n"
+    "Restore it next to `eurocycles_db` (same `RESTORE ... WITH MOVE` step) "
+    "and reload — the rest of the Management view works without it."
+)
+
+
+def db_notice(db: str, what: str, ctx: "Ctx | None" = None) -> None:
     """Shown in a tab whose extra database isn't attached."""
-    st.info(
-        f"**{what} needs the `{db}` database**, which isn't attached to this "
-        f"SQL Server instance.\n\n"
-        f"Restore it next to `eurocycles_db` (same `RESTORE ... WITH MOVE` step) "
-        f"and reload — the rest of the Management view works without it."
-    )
+    fmt = (ctx.tf if ctx else lambda s, **kw: s.format(**kw))
+    st.info(fmt(_DB_NOTICE, what=what, db=db))
 
 
-def yoy(cur_v, prev_v, *, pct: bool = False) -> str | None:
+def yoy(cur_v, prev_v, *, pct: bool = False, ctx: Ctx | None = None) -> str | None:
+    """Streamlit renders this inside its own delta chip, which parses the
+    leading sign — so the number has to stay at the front, translated or not."""
     if prev_v is None or pd.isna(prev_v) or prev_v == 0 or pd.isna(cur_v):
         return None
     if pct:
         return f"{cur_v - prev_v:+.1f} pp"
-    return f"{(cur_v - prev_v) / abs(prev_v) * 100:+.0f}% YoY"
+    suffix = ctx.t("YoY") if ctx else "YoY"
+    return f"{(cur_v - prev_v) / abs(prev_v) * 100:+.0f}% {suffix}"

@@ -37,7 +37,7 @@ UK_VAT_PCT = 20.0
 
 
 def render(scope: pd.DataFrame, ctx: Ctx) -> None:
-    st.subheader(f"Value chain — the {SHELF_LABEL.title()} shelf against our build cost")
+    st.subheader(ctx.t("Value chain") + f" — the {SHELF_LABEL.title()} shelf against our build cost")
 
     shelf, snapshot = crosswalk.load_shelf(SHELF)
     if shelf.empty:
@@ -66,12 +66,13 @@ def render(scope: pd.DataFrame, ctx: Ctx) -> None:
 
     _coverage_caption(econ, groups, hal, links, models, snapshot, ctx)
     if econ.empty:
-        st.warning("Nothing on the shelf matched a model with sales in this year range.")
+        st.warning(ctx.t("Nothing on the shelf matched a model with sales in this year range."))
         return
 
     ranked = econ[econ["units"] >= min_units]
     if ranked.empty:
-        st.info(f"No matched model reached {min_units:,} units in {ctx.yr_lo}–{ctx.yr_hi}.")
+        st.info(ctx.tf("No matched model reached {n} units in {lo}–{hi}.",
+                       n=f"{min_units:,}", lo=ctx.yr_lo, hi=ctx.yr_hi))
         return
 
     _headline(ranked, ctx)
@@ -89,20 +90,24 @@ def _controls(ctx: Ctx) -> tuple[float, float, str, int]:
     c1, c2, c3, c4 = st.columns([1.1, 1, 1.2, 1])
     default_rate = round(ctx.fx.get("USD", 3.0) * USD_PER_GBP, 3)
     rate = c1.number_input(
-        "DT per £1", min_value=0.5, max_value=20.0, value=default_rate, step=0.01,
+        ctx.t("DT per £1"), min_value=0.5, max_value=20.0, value=default_rate, step=0.01,
         format="%.3f",
-        help=f"The ERP invoices {SHELF_LABEL.title()} in USD and stores no GBP rate, so this "
-             f"one is set here. The default is the ERP's own latest USD rate "
-             f"({ctx.fx.get('USD', 0):.3f} DT/$) × {USD_PER_GBP} $/£. Every £ figure on this "
-             "tab moves with it — our costs and prices, never the retail price.")
-    vat = c2.number_input("UK VAT %", min_value=0.0, max_value=30.0, value=UK_VAT_PCT, step=0.5,
-                          help="Stripped from the shelf price before anything is compared with "
-                               "our ex-works invoice.")
-    basis = c3.selectbox("Retail price", ["Shelf price today", "RRP"],
-                         help="Shelf price is what the site charges now (after any discount). "
-                              "RRP is the price it is discounted from.")
-    min_units = c4.number_input("Min units (period)", 0, 100000, 100, step=50,
-                                help="Drops sample and run-out lines before ranking.")
+        help=ctx.tf("The ERP invoices {shelf} in USD and stores no GBP rate, so this one is "
+                    "set here. The default is the ERP's own latest USD rate ({usd} DT/$) × "
+                    "{gbp} $/£. Every £ figure on this tab moves with it — our costs and "
+                    "prices, never the retail price.",
+                    shelf=SHELF_LABEL.title(), usd=f"{ctx.fx.get('USD', 0):.3f}",
+                    gbp=USD_PER_GBP))
+    vat = c2.number_input(ctx.t("UK VAT %"), min_value=0.0, max_value=30.0,
+                          value=UK_VAT_PCT, step=0.5,
+                          help=ctx.t("Stripped from the shelf price before anything is compared with "
+                               "our ex-works invoice."))
+    basis = c3.selectbox(ctx.t("Retail price"), ["Shelf price today", "RRP"],
+                         format_func=ctx.t,
+                         help=ctx.t("Shelf price is what the site charges now (after any discount). "
+                              "RRP is the price it is discounted from."))
+    min_units = c4.number_input(ctx.t("Min units (period)"), 0, 100000, 100, step=50,
+                                help=ctx.t("Drops sample and run-out lines before ranking."))
     return rate, vat, ("shelf_price" if basis.startswith("Shelf") else "rrp"), int(min_units)
 
 
@@ -191,36 +196,39 @@ def _headline(e: pd.DataFrame, ctx: Ctx) -> None:
     retail = (e["retail"] * e["units"]).sum()
 
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Bikes in view", f"{units:,.0f}", border=True, height=TILE_H,
+    c1.metric(ctx.t("Bikes in view"), f"{units:,.0f}", border=True, height=TILE_H,
               help=f"Units invoiced {ctx.yr_lo}–{ctx.yr_hi} on the models matched to the shelf.")
-    c2.metric("Retail value", f"£{retail / 1e6:,.1f}M", border=True, height=TILE_H,
-              help="What those bikes are worth at today's shelf price, ex-VAT — "
-                   "the end-customer value the whole chain shares.")
-    c3.metric("Our margin", f"{_pct(rev - cost, rev):.1f}%", border=True, height=TILE_H,
+    c2.metric(ctx.t("Retail value"), f"£{retail / 1e6:,.1f}M", border=True, height=TILE_H,
+              help=ctx.t("What those bikes are worth at today's shelf price, ex-VAT — "
+                   "the end-customer value the whole chain shares."))
+    c3.metric(ctx.t("Our margin"), f"{_pct(rev - cost, rev):.1f}%", border=True, height=TILE_H,
               help=f"£{(rev - cost) / 1e6:,.1f}M on £{rev / 1e6:,.1f}M invoiced. "
                    "Company target is 25%.")
-    c4.metric(f"{SHELF_LABEL.title()}' margin", f"{_pct(retail - rev, retail):.1f}%",
+    c4.metric(ctx.tf("{shelf}' margin", shelf=SHELF_LABEL.title()),
+              f"{_pct(retail - rev, retail):.1f}%",
               border=True, height=TILE_H,
               help=f"£{(retail - rev) / 1e6:,.1f}M — what the shelf keeps between our invoice "
                    "and the ex-VAT retail price. Their buying, warehousing and store cost "
                    "comes out of this; it is a gross margin, not their profit.")
-    c5.metric("We keep", f"{_pct(rev, retail):.0f}%", border=True, height=TILE_H,
-              help="Our invoice as a share of the ex-VAT retail price — our slice of what "
-                   "the end customer pays.")
+    c5.metric(ctx.t("We keep"), f"{_pct(rev, retail):.0f}%", border=True, height=TILE_H,
+              help=ctx.t("Our invoice as a share of the ex-VAT retail price — our slice of what "
+                   "the end customer pays."))
 
 
 # -------------------------------------------------------- where it all goes ---
 def _value_split(e: pd.DataFrame, ctx: Ctx) -> None:
-    st.subheader("Where the retail price goes")
-    st.caption("Each bar is one bike at its shelf price, ex-VAT, split three ways. "
-               "Ordered by units invoiced, so the bikes that matter most are at the top.")
+    st.subheader(ctx.t("Where the retail price goes"))
+    st.caption(ctx.t("Each bar is one bike at its shelf price, ex-VAT, split three ways. "
+               "Ordered by units invoiced, so the bikes that matter most are at the top."))
     P = ctx.P
     d = e.head(18).iloc[::-1]
 
     fig = go.Figure()
     for col, name, colour in (("cost", "Our build cost", P["series"][0]),
                               ("our_margin", "Our margin", P["series"][2]),
-                              ("their_margin", f"{SHELF_LABEL.title()}' margin", P["series"][1])):
+                              ("their_margin", ctx.tf("{shelf}' margin",
+                                                      shelf=SHELF_LABEL.title()),
+                               P["series"][1])):
         fig.add_bar(
             x=d[col], y=hbar_categories(fig, d["label"]), orientation="h",
             name=name,
@@ -234,15 +242,15 @@ def _value_split(e: pd.DataFrame, ctx: Ctx) -> None:
     style_fig(fig, height=max(320, 28 * len(d) + 70), xgrid=True, ygrid=False)
     fig.update_layout(barmode="relative", showlegend=True, bargap=0.35,
                       margin=dict(l=4, r=16, t=48, b=4))
-    fig.update_xaxes(title_text="£ per bike, ex-VAT", tickprefix="£")
+    fig.update_xaxes(title_text=ctx.t("£ per bike, ex-VAT"), tickprefix="£")
     st.plotly_chart(fig, width="stretch", theme=None)
-    st.caption("A bar where the third block runs backwards is a bike whose shelf price has "
-               "fallen below what we invoice — a clearance line, or a match worth checking.")
+    st.caption(ctx.t("A bar where the third block runs backwards is a bike whose shelf price has "
+               "fallen below what we invoice — a clearance line, or a match worth checking."))
 
 
 # -------------------------------------------------------------- the leverage ---
 def _leverage(e: pd.DataFrame, ctx: Ctx) -> None:
-    st.subheader("Who is making the money")
+    st.subheader(ctx.t("Who is making the money"))
     P = ctx.P
     their_blend = float(_pct((e["their_margin"] * e["units"]).sum(),
                              (e["retail"] * e["units"]).sum()))
@@ -279,7 +287,7 @@ def _leverage(e: pd.DataFrame, ctx: Ctx) -> None:
     fig.add_vline(x=our_blend, line_width=1, line_dash="dot", line_color=P["axis"])
     fig.add_hline(y=their_blend, line_width=1, line_dash="dot", line_color=P["axis"])
     style_fig(fig, height=420, xgrid=True, ygrid=True)
-    fig.update_xaxes(title_text="Our gross margin %", ticksuffix="%")
+    fig.update_xaxes(title_text=ctx.t("Our gross margin %"), ticksuffix="%")
     fig.update_yaxes(title_text=f"{SHELF_LABEL.title()}' gross margin %", ticksuffix="%")
     st.plotly_chart(fig, width="stretch", theme=None)
 
@@ -293,14 +301,14 @@ def _leverage(e: pd.DataFrame, ctx: Ctx) -> None:
 
 # ------------------------------------------------------------------- table ---
 def _table(e: pd.DataFrame, ctx: Ctx) -> None:
-    st.subheader("Every matched model")
+    st.subheader(ctx.t("Every matched model"))
     st.dataframe(
         e[["label", "units", "cost", "fob", "our_margin_pct", "retail", "retail_inc",
            "their_margin_pct", "we_keep_pct", "multiple", "listings", "n_articles",
            "confidence"]],
         hide_index=True, width="stretch",
         column_config={
-            "label": "Model",
+            "label": ctx.t("Model"),
             "units": st.column_config.NumberColumn("Units", format="%d"),
             "cost": st.column_config.NumberColumn("Build cost", format="£%.0f"),
             "fob": st.column_config.NumberColumn("We invoice", format="£%.0f"),
@@ -310,12 +318,12 @@ def _table(e: pd.DataFrame, ctx: Ctx) -> None:
             "their_margin_pct": st.column_config.NumberColumn("Their margin", format="%.1f%%"),
             "we_keep_pct": st.column_config.NumberColumn("We keep", format="%.0f%%"),
             "multiple": st.column_config.NumberColumn("Retail ×", format="%.2f×",
-                                                      help="Ex-VAT retail ÷ our invoice."),
+                                                      help=ctx.t("Ex-VAT retail ÷ our invoice.")),
             "listings": st.column_config.NumberColumn("Listings", format="%d",
-                                                      help="Colourways listed for this model."),
+                                                      help=ctx.t("Colourways listed for this model.")),
             "n_articles": st.column_config.NumberColumn("Articles", format="%d",
-                                                        help="Our articles folded into it."),
-            "confidence": "Match",
+                                                        help=ctx.t("Our articles folded into it.")),
+            "confidence": ctx.t("Match"),
         },
     )
 
@@ -330,13 +338,11 @@ def _leftovers(groups, econ, hal, links, models, ctx: Ctx) -> None:
 
     unbuilt = groups[groups["n_articles"] == 0]
     with st.expander(f"On the shelf, not built by us — {len(unbuilt)} models"):
-        st.caption(
-            "Apollo-branded bikes Halfords lists that no model of ours matches. Some are "
+        st.caption(ctx.t("Apollo-branded bikes Halfords lists that no model of ours matches. Some are "
             "genuinely sourced elsewhere — that is shelf space to compete for; others are "
-            "ours under a name the shelf doesn't use. Either is worth a look."
-        )
+            "ours under a name the shelf doesn't use. Either is worth a look."))
         if unbuilt.empty:
-            st.caption("Nothing — every listed model matched.")
+            st.caption(ctx.t("Nothing — every listed model matched."))
         else:
             u = unbuilt.assign(wheel=unbuilt["wheel_in"].map(
                 lambda w: "" if pd.isna(w) else f'{w:g}"'))
@@ -347,7 +353,7 @@ def _leftovers(groups, econ, hal, links, models, ctx: Ctx) -> None:
                     "example": "Listing", "wheel": "Wheel",
                     "listings": st.column_config.NumberColumn("Listings", format="%d"),
                     "shelf_price": st.column_config.NumberColumn("Shelf price", format="£%.0f"),
-                    "categories": "Category",
+                    "categories": ctx.t("Category"),
                     "url": st.column_config.LinkColumn("Link", display_text="open"),
                 })
 
@@ -371,19 +377,19 @@ def _leftovers(groups, econ, hal, links, models, ctx: Ctx) -> None:
             "is a delisting worth asking about."
         )
         if agg.empty:
-            st.caption("Nothing — every model we sold is still listed.")
+            st.caption(ctx.t("Nothing — every model we sold is still listed."))
         else:
             st.dataframe(
                 agg.head(60), hide_index=True, width="stretch",
                 column_config={
-                    "libnach": "Our model",
+                    "libnach": ctx.t("Our model"),
                     "units": st.column_config.NumberColumn("Units", format="%d"),
                     "revenue": st.column_config.NumberColumn("Revenue (DT)", format="%.0f"),
                     "last_yr": st.column_config.NumberColumn("Last sold", format="%d"),
                     "season": st.column_config.NumberColumn("Season", format="%d"),
                 })
 
-    with st.expander("How the join works"):
+    with st.expander(ctx.t("How the join works")):
         st.markdown(f"""
 No identifier is shared between the two systems, so a listing is matched to our
 articles by **model name**, narrowed by **e-bike flag** and **wheel size**:

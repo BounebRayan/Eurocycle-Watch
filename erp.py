@@ -1,18 +1,29 @@
 """Read access to the Eurocycles ERP (SQL Server).
 
-The management view runs off this. It is **local-first**: the ERP lives on a
-developer's `(localdb)\\MSSQLLocalDB` and is not reachable from Streamlit Cloud,
-so every entry point degrades gracefully — `status()` says whether we're
-connected and the view shows an explainer instead of half a dashboard.
+The management view runs off this. It is **local-first**: the ERP lives on the
+dev machine's own SQL Server instance (`EC-RAYAN`, the always-on default
+instance — see below) and is not reachable from Streamlit Cloud, so every
+entry point degrades gracefully — `status()` says whether we're connected and
+the view shows an explainer instead of half a dashboard.
 
 Connection string resolution order:
   1. st.secrets["erp"]["odbc"]      (Streamlit Cloud / shared config)
   2. env var ERP_ODBC
-  3. local LocalDB default (below)
+  3. local default (below)
 
-NOTE on the LocalDB default: this instance does **not** support encryption at
-all, so the connection string the ERP ships (`Encrypt=True`) fails with
-"encryption not supported". `Encrypt=no` is required.
+NOTE on the default: this instance does **not** support encryption at all, so
+the connection string the ERP ships (`Encrypt=True`) fails with "encryption
+not supported". `Encrypt=no` is required.
+
+NOTE on `EC-RAYAN` vs `(localdb)\\MSSQLLocalDB`: both exist on this machine.
+`EC-RAYAN` is the full `MSSQLSERVER` Windows service (AUTO_START, always
+running) and has every satellite DB restored, including a couple not wired up
+here yet (`eurocycles_mfc`, `eurocycles_db_actia`, `eurocycles_db_trace`,
+`eurocycles_db_images`, `ECMagasin`). LocalDB is a per-user, on-demand instance
+that spins up on first connection and auto-shuts down after sitting idle —
+that cold start is the "sometimes it just hangs for a while" behaviour; once
+it's warm, queries are fast until it idles out again. `EC-RAYAN` doesn't have
+that problem, which is the main reason to point at it instead.
 """
 from __future__ import annotations
 
@@ -25,20 +36,24 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from i18n import N_
+
 DEFAULT_ODBC = (
     "DRIVER={ODBC Driver 17 for SQL Server};"
-    "SERVER=(localdb)\\MSSQLLocalDB;DATABASE=eurocycles_db;"
+    "SERVER=EC-RAYAN;DATABASE=eurocycles_db;"
     "Trusted_Connection=yes;Encrypt=no;"
 )
 
-# The management view reads the main ERP plus two satellite databases on the same
-# instance: the costing/valuation engine (component price history) and the
-# label-printing trace (unit throughput). Tabs that need one degrade to a notice
-# when it isn't attached — see `db_present()`. `eurocycles_mfc` holds a clean
-# model cross-reference but nothing reads it yet, so it isn't declared here.
+# The management view reads the main ERP plus three satellite databases on the
+# same instance: the costing/valuation engine (component price history), the
+# label-printing trace (unit throughput), and the product-photo store. Tabs
+# that need one degrade to a notice when it isn't attached — see
+# `db_present()`. `eurocycles_mfc` holds a clean model cross-reference but
+# nothing reads it yet, so it isn't declared here.
 MAIN_DB = "eurocycles_db"
 CALC_DB = "eurocycles_db_calc"
 LABEL_DB = "eurocycles_label"
+IMAGES_DB = "eurocycles_db_images"
 
 
 # Base currency of the ERP. Sales are invoiced in USD/EUR/DT; every amount we
@@ -176,7 +191,16 @@ def load_sales(start_year: int = 2019, bikes_only: bool = True) -> pd.DataFrame:
     - revenue  = qte * prx * cours   (matches invoice `ttc`)
     - COGS     = facture_det.mat     (ERP-costed, in DT, 100% populated)
     - distributor = the model's customer (nomachat.cusnach -> customer.libcust)
-    """
+
+    **`d.typ` must be `O` or `I`, not `O` alone.** `I` is 0.6-3.1M DT of genuine
+    bike sales a year (6.5 % of 2026 revenue, 9,468 units) to the same
+    distributors — Halfords, MFC, JD Sports — and 127 invoices carry both `O`
+    and `I` lines, so it is a line attribute, not a separate document series.
+    Its COGS coverage matches `O`'s (668/671 lines vs 26,767/26,811), so margin
+    maths is unaffected. Filtering to `O` alone silently dropped it and put every
+    total ~6 % under the ERP's own report (see the Classeur3 reconciliation in
+    docs §12c). `N`/`S`/`P` stay out: zero COGS on all of them, and `N`'s
+    articles are literal `xxx`/`XXX` placeholders."""
     bike_filter = "AND n.isBike = 1" if bikes_only else ""
     df = _q(f"""
         SELECT
@@ -194,7 +218,7 @@ def load_sales(start_year: int = 2019, bikes_only: bool = True) -> pd.DataFrame:
         LEFT JOIN customer cu ON TRY_CONVERT(float, n.cusnach) = cu.codcust
         WHERE f.datf >= :start
           AND f.cours > 0
-          AND (d.typ = 'O' OR d.typ IS NULL)
+          AND (d.typ IN ('O','I') OR d.typ IS NULL)
           {bike_filter}
     """, start=f"{start_year}-01-01")
 
@@ -207,7 +231,81 @@ def load_sales(start_year: int = 2019, bikes_only: bool = True) -> pd.DataFrame:
     df["model_label"] = df["model_label"].where(df["model_label"] != "", df["article"])
     df["line_margin_dt"] = df["line_rev_dt"] - df["line_cogs_dt"]
     df["ebike"] = df["ebike"].fillna(0).astype(int)
+    df["design_key"] = df["article"].map(design_key)
+    # Wheel size and destination country come from two tiny dimension tables
+    # (17 and 233 rows) and are mapped here rather than joined in the query
+    # above: as SQL joins they turned a 3-second read into a 120-second one,
+    # because neither key is indexed for it.
+    df["wheel_size"] = df["wheelnach"].map(_wheel_sizes()).fillna("(unknown)")
+    df["country"] = df["clif"].astype(str).str.strip().map(_client_countries()).fillna("(unknown)")
     return df
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _wheel_sizes() -> dict:
+    """`nomachat.wheelnach` -> the ERP's own wheel label ('20"', '27" 1/2',
+    '700C'). `libwheel` carries trailing spaces on some rows ('26" Kids ')."""
+    df = _q("SELECT codwheel, libwheel FROM Wheelsize")
+    return {str(k).strip(): str(v).strip() for k, v in zip(df["codwheel"], df["libwheel"])}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _client_countries() -> dict:
+    """`facture.clif` -> `client.pays`, the destination country of the invoice.
+
+    This is the *invoiced client's* country, which is not the same thing as the
+    owning customer on the model: a distributor can invoice through an entity in
+    another country."""
+    df = _q("SELECT codecli, pays FROM client WHERE pays IS NOT NULL AND LTRIM(RTRIM(pays)) <> ''")
+    return {str(k).strip(): str(v).strip() for k, v in zip(df["codecli"], df["pays"])}
+
+
+def design_key(article: str) -> str:
+    """A season-independent identity for a bike, out of the article code.
+
+    `codnach` carries the model year in its first two digits (see
+    `_decode_codnach`), so the *same* bike gets a new code every season:
+    `HA 2027813` and `HA 2227813` are the 2020 and 2022 ENTICE 17" — same
+    prefix, same wheel, same serial, different year. Grouping by `article`
+    therefore reports the annual re-coding of the range as if the whole
+    catalogue had been dropped and replaced.
+
+    Measured on this data: year-on-year, 59 % of a year's margin sits on
+    articles that also sold the year before, but 72-80 % sits on *design keys*
+    that did. The convention decodes on 100 % of the 4,171 articles with sales,
+    company-wide — not only the customers whose codes look tidy.
+
+    Falls back to the raw code when it doesn't parse, so an unparseable article
+    is its own design rather than silently merging with others."""
+    prefix, _yr, wheel = _decode_codnach(article)
+    if prefix is None or wheel is None:
+        return (article or "").strip().upper()
+    serial = re.sub(r"[\s\-/]", "", article.upper())[len(prefix) + 4:]
+    return f"{prefix}|{wheel}|{serial}"
+
+
+# --------------------------------------------------------------- photos ---
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_model_image(article: str) -> bytes | None:
+    """One model's product photo as JPEG bytes, or `None` if it has none.
+
+    `eurocycles_db_images.nomachat_img` keys on `code` = `nomachat.codnach`
+    verbatim, one row per model — 147 of them on this restore, so most models
+    have no photo and callers must handle `None`. The blob itself isn't a raw
+    image: it's gzip-compressed with an undocumented 4-byte little-endian
+    length prefix ahead of the gzip stream (confirmed by decompressing and
+    checking for a JPEG SOI marker — there's no column that says so)."""
+    import gzip
+    from sqlalchemy import text
+    with _engine(IMAGES_DB).connect() as c:
+        row = c.execute(text("SELECT img FROM nomachat_img WHERE code = :code"),
+                         {"code": article}).fetchone()
+    if row is None or row[0] is None:
+        return None
+    try:
+        return gzip.decompress(bytes(row[0])[4:])
+    except OSError:
+        return None
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -283,7 +381,7 @@ def load_plan_vs_actual(start_year: int = 2022) -> pd.DataFrame:
         JOIN facture_det d ON d.fact = f.numf
         LEFT JOIN client cl ON LTRIM(RTRIM(cl.codecli)) = LTRIM(RTRIM(f.clif))
         LEFT JOIN customer cu ON cu.codcust = TRY_CONVERT(float, cl.codcust)
-        WHERE f.datf >= :start AND (d.typ = 'O' OR d.typ IS NULL)
+        WHERE f.datf >= :start AND (d.typ IN ('O','I') OR d.typ IS NULL)
         GROUP BY cu.libcust, d.article,
                  DATEFROMPARTS(YEAR(f.datf), MONTH(f.datf), 1)
     """, start=f"{start_year}-01-01")
@@ -470,6 +568,55 @@ def load_receipts(start_year: int = 2022) -> pd.DataFrame:
     return df
 
 
+# `chargeprs.cod` -> the payroll line it is, using the labels the finance pack
+# (Classeur2 §070 SALAIRES ET CHARGES) prints. The two code schemes differ, so
+# this map is the bridge; it was verified line by line against the Jan-Jun 2026
+# pack — `001`, `040`, `050`, `070` and `090` match it to the dinar. See §12c.
+# `N_` marks these for translation without translating them here — they are data
+# values that reach the UI through a DataFrame column, and `views` translates
+# them where they render.
+PAYROLL_LINES = {
+    "001": N_("Wages"),
+    "020": N_("Staff transport"),
+    "040": N_("CNSS (social security)"),
+    "050": N_("Workwear"),
+    "070": N_("Occupational health"),
+    "080": N_("Social charges & other"),
+    "090": N_("Executive pay"),
+}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_payroll(start_year: int = 2019) -> pd.DataFrame:
+    """Monthly payroll cost from `chargeprs`, one row per month per line.
+
+    `chargeprs` is a year x code matrix with a column per month (`m01`..`m12`),
+    so it is unpivoted here into `(month, cod, line, amount_dt)`. Amounts are
+    already in DT — this table is domestic payroll, there is no FX on it.
+
+    **Two lines are under-populated in this restore.** `020` (staff transport)
+    is all zeros though the finance pack carries it, and `080` (social charges)
+    runs slightly under the pack. Together they are the whole of the ~1.9 %
+    difference against Classeur2; every other line agrees exactly. Treat the
+    total as a floor, not a signed-off payroll figure.
+
+    Months with a zero are dropped rather than plotted as a real zero: the
+    current year's unreached months are stored as 0, and charting those would
+    draw a cliff to the end of the year."""
+    df = _q("SELECT * FROM chargeprs WHERE an >= :yr", yr=start_year)
+    if df.empty:
+        return pd.DataFrame(columns=["month", "cod", "line", "amount_dt"])
+    months = [f"m{i:02d}" for i in range(1, 13)]
+    long = df.melt(id_vars=["an", "cod"], value_vars=months,
+                   var_name="m", value_name="amount_dt")
+    long["cod"] = long["cod"].astype(str).str.strip()
+    long["month"] = pd.to_datetime(
+        dict(year=long["an"].astype(int), month=long["m"].str[1:].astype(int), day=1))
+    long["line"] = long["cod"].map(PAYROLL_LINES).fillna("Other (" + long["cod"] + ")")
+    long["amount_dt"] = long["amount_dt"].fillna(0.0)
+    return long[long["amount_dt"] != 0][["month", "cod", "line", "amount_dt"]]
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_commissions() -> tuple[pd.DataFrame, pd.DataFrame]:
     """`(rates, agent_invoices)` for the sales-commission estimate.
@@ -495,6 +642,31 @@ def load_commissions() -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
+def load_company_totals(year: int) -> pd.DataFrame:
+    """Company-wide invoiced revenue and material COGS per month, one year.
+
+    Deliberately unfiltered — no bikes-only, no distributor — because its job is
+    to be compared against the accounting pack, which is company-wide. Using
+    the sidebar-filtered `scope` for that comparison would put a subset against
+    a total and make the two look irreconcilable."""
+    df = _q("""
+        SELECT MONTH(f.datf) AS mo,
+               SUM(d.qte * d.prx * f.cours) AS revenue_dt,
+               SUM(d.mat)                   AS material_cogs_dt,
+               SUM(d.qte)                   AS units
+        FROM facture f
+        JOIN facture_det d ON d.fact = f.numf
+        WHERE YEAR(f.datf) = :yr AND f.cours > 0
+          AND (d.typ IN ('O','I') OR d.typ IS NULL)
+        GROUP BY MONTH(f.datf)
+    """, yr=year)
+    if df.empty:
+        return df
+    df["month"] = pd.to_datetime(dict(year=year, month=df["mo"], day=1))
+    return df.sort_values("month")
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
 def load_monthly_billings(start_year: int = 2019) -> pd.DataFrame:
     """Invoiced revenue (all lines, DT) per calendar month — a light query for
     the billings-vs-collections view, so it doesn't pay for a full `load_sales`."""
@@ -503,7 +675,7 @@ def load_monthly_billings(start_year: int = 2019) -> pd.DataFrame:
                SUM(d.qte * d.prx * f.cours) AS billed_dt
         FROM facture f
         JOIN facture_det d ON d.fact = f.numf
-        WHERE f.datf >= :start AND f.cours > 0 AND (d.typ = 'O' OR d.typ IS NULL)
+        WHERE f.datf >= :start AND f.cours > 0 AND (d.typ IN ('O','I') OR d.typ IS NULL)
         GROUP BY DATEFROMPARTS(YEAR(f.datf), MONTH(f.datf), 1)
     """, start=f"{start_year}-01-01")
     df["month"] = pd.to_datetime(df["month"])
@@ -560,3 +732,10 @@ def _decode_codnach(code: str) -> tuple[str | None, int | None, int | None]:
         return (None, None, None)
     prefix, yy, ww = m.group(1), int(m.group(2)), int(m.group(3))
     return (prefix, 2000 + yy, ww if ww in _WHEEL_CODES else None)
+
+
+def decode_article(code: str) -> tuple[str | None, int | None, int | None]:
+    """`(prefix, season_yr, wheel_in)` for one article code — the public form
+    of `_decode_codnach`, for callers that just want the season/wheel without
+    going through `design_key` or `load_customer_models`."""
+    return _decode_codnach(code)

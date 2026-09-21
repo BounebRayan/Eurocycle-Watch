@@ -43,6 +43,10 @@ MIN_PLANNED_UNITS = 500
 # A model has to lose this many points of margin year on year before it's worth
 # a conversation; below it, mix and timing explain most of the movement.
 EROSION_PP = 3.0
+# How far a model's bill of materials has to have re-quoted upward before it is
+# worth reopening the price. Below this, component noise and rounding on a few
+# small parts explain it. Measured like-for-like — see `_rule_requote`.
+REQUOTE_RISE_PCT = 2.0
 # An OF this far under its plan is a miss worth listing.
 ATTAINMENT_PCT = 80.0
 # How far past its planned week an order has to be before a shortfall counts as
@@ -65,7 +69,7 @@ class Finding:
 
 
 def render(scope: pd.DataFrame, ctx: Ctx) -> None:
-    st.subheader(f"What needs attention — {ctx.dist_label}, {ctx.yr_lo}–{ctx.yr_hi}")
+    st.subheader(ctx.t("What needs attention") + f" — {ctx.dist_label}, {ctx.yr_lo}–{ctx.yr_hi}")
 
     findings: list[Finding] = []
     for rule in RULES:
@@ -78,8 +82,8 @@ def render(scope: pd.DataFrame, ctx: Ctx) -> None:
             findings.append(f)
 
     if not findings:
-        st.success("**Nothing is breaking a threshold in this period.** "
-                   "Widen the year range or lower the filters if that reads too quiet.")
+        st.success(ctx.t("**Nothing is breaking a threshold in this period.** "
+                   "Widen the year range or lower the filters if that reads too quiet."))
         return
 
     findings.sort(key=lambda f: f.value_dt, reverse=True)
@@ -87,25 +91,26 @@ def render(scope: pd.DataFrame, ctx: Ctx) -> None:
     items = sum(len(f.items) for f in findings)
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Open items", f"{items:,}", border=True, height=TILE_H,
-              help="Rows breaking a threshold across every rule below.")
-    c2.metric("At stake", tile(total, ctx), border=True, height=TILE_H,
+    c1.metric(ctx.t("Open items"), f"{items:,}", border=True, height=TILE_H,
+              help=ctx.t("Rows breaking a threshold across every rule below."))
+    c2.metric(ctx.t("At stake"), tile(total, ctx), border=True, height=TILE_H,
               help=f"{money(total, ctx)} — the sum of every item's sizing. Each rule "
                    "states its own basis; they are not all the same kind of money, so "
                    "read this as an order of magnitude, not a forecast.")
-    c3.metric("Rules triggered", f"{len(findings)} of {len(RULES)}", border=True, height=TILE_H)
+    c3.metric(ctx.t("Rules triggered"), f"{len(findings)} of {len(RULES)}", border=True, height=TILE_H)
 
-    st.caption("Ranked by money at stake. Each block says how that number was arrived at "
-               "and which tab holds the evidence — this page is the index, not the analysis.")
+    st.caption(ctx.t("Ranked by money at stake. Each block says how that number was arrived at "
+               "and which tab holds the evidence — this page is the index, not the analysis."))
 
     for f in findings:
         st.divider()
         left, right = st.columns([3, 1])
         left.markdown(f"### {f.title}")
-        right.metric("At stake", tile(f.value_dt, ctx), border=True,
+        right.metric(ctx.t("At stake"), tile(f.value_dt, ctx), border=True,
                      label_visibility="collapsed")
         st.markdown(f"{f.why}")
-        st.caption(f"**{len(f.items)} items** · {f.basis} · evidence: **{f.tab}** tab")
+        st.caption(ctx.tf("**{n} items** · {basis} · evidence: **{tab}** tab",
+                          n=len(f.items), basis=f.basis, tab=f.tab))
         st.dataframe(f.items, hide_index=True, width="stretch", column_config=f.columns)
 
 
@@ -163,7 +168,7 @@ def _rule_below_target(scope: pd.DataFrame, ctx: Ctx) -> Finding | None:
         tab="Models", items=out.head(25),
         value_dt=float(bad["shortfall"].sum()),
         columns={"article": "Code", "model": "Model", "brand": "Brand",
-                 "distributor": "Customer",
+                 "distributor": ctx.t("Customer"),
                  "units": st.column_config.NumberColumn("Units", format="%d"),
                  "margin_pct": st.column_config.NumberColumn("Margin", format="%.1f%%"),
                  "shortfall": _money_col(f"Shortfall ({ctx.ccy})")})
@@ -196,7 +201,7 @@ def _rule_loss_making(scope: pd.DataFrame, ctx: Ctx) -> Finding | None:
         basis=f"the realised loss in {yr}",
         tab="Models", items=out.head(25), value_dt=float(bad["loss"].sum()),
         columns={"article": "Code", "model": "Model", "brand": "Brand",
-                 "distributor": "Customer",
+                 "distributor": ctx.t("Customer"),
                  "units": st.column_config.NumberColumn("Units", format="%d"),
                  "margin_pct": st.column_config.NumberColumn("Margin", format="%.1f%%"),
                  "loss": _money_col(f"Loss ({ctx.ccy})")})
@@ -375,10 +380,76 @@ def _rule_attainment(scope: pd.DataFrame, ctx: Ctx) -> Finding | None:
                  "attainment": st.column_config.NumberColumn("Attainment", format="%.0f%%")})
 
 
+def _rule_requote(scope: pd.DataFrame, ctx: Ctx) -> Finding | None:
+    """Models whose components cost more now than when the model was costed.
+
+    Every other margin rule here is backward-looking: it reads margin that has
+    *already* been realised and infers that something moved. This one reads the
+    component prices directly, so it fires on a cost rise the moment the part
+    master carries it — before a single bike ships at the old price.
+
+    The sizing uses the **like-for-like** re-quotation, not the GPAO's. The
+    GPAO scores a component with no current price as costing zero, which
+    understates the rise and, on roughly one model in six, reverses its sign —
+    so ranking a to-do list on the GPAO's figure would put real rises below
+    imaginary savings. See `gpao_requote.UNQUOTED_DEFECT`.
+    """
+    yr, _ = _latest_years(scope)
+    if yr is None:
+        return None
+
+    import gpao_requote as R
+    req = R.load_requote(yr)
+    if req.empty:
+        return None
+
+    risen = req[(req["ecart_lfl_pct"] >= REQUOTE_RISE_PCT) & (req["ecart_lfl"] > 0)]
+    if risen.empty:
+        return None
+
+    pm = _per_model_year(scope, yr)
+    m = risen.merge(pm[["article", "model", "brand", "distributor", "units",
+                        "revenue", "margin_pct"]], on="article", how="inner")
+    m = m[m["units"] >= MIN_UNITS_MARGIN]
+    if m.empty:
+        return None
+
+    # The cost rise is per bike; the exposure is that rise across the volume
+    # actually sold. It is what the year would have cost at the new component
+    # prices and the old sale price — not a loss already taken.
+    m["exposure"] = m["ecart_lfl"] * m["units"]
+    m = m.sort_values("exposure", ascending=False)
+
+    out = m[["article", "model", "distributor", "units", "ecart_lfl_pct",
+             "margin_pct", "unquoted_lines", "exposure"]].copy()
+    out["exposure"] = to_disp(out["exposure"], ctx)
+    return Finding(
+        key="requote",
+        title="Component costs have risen — the price hasn't",
+        why="These models' bills of materials re-quote higher at today's component prices "
+            "than the price they were costed at. Unlike the margin rules above, this reads "
+            "the part master rather than realised margin, so it fires before the erosion "
+            "shows up in the accounts. Each one is a candidate for the next price list — "
+            "the Re-quotation tab shows which components moved.",
+        basis=f"the like-for-like cost rise per bike × {yr} units",
+        tab="Re-quotation", items=out.head(25),
+        value_dt=float(m["exposure"].sum()),
+        columns={"article": "Code", "model": "Model",
+                 "distributor": ctx.t("Customer"),
+                 "units": st.column_config.NumberColumn("Units", format="%d"),
+                 "ecart_lfl_pct": st.column_config.NumberColumn(
+                     "Cost rise", format="%.1f%%"),
+                 "margin_pct": st.column_config.NumberColumn("Margin", format="%.1f%%"),
+                 "unquoted_lines": st.column_config.NumberColumn(
+                     "Unpriced parts", format="%d"),
+                 "exposure": _money_col(f"Exposure ({ctx.ccy})")})
+
+
 RULES: list[Callable[[pd.DataFrame, Ctx], Finding | None]] = [
     _rule_below_target,
     _rule_loss_making,
     _rule_erosion,
+    _rule_requote,
     _rule_price_rise,
     _rule_delisted,
     _rule_attainment,

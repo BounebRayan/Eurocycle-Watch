@@ -126,6 +126,34 @@ That fact is the backbone of the redesign the user asked for:
 **Active bike models filter:** `isBike = 1 AND isArchived = 0`
 (→ ~11,376 active; ~7,018 archived; ~933 non-bike).
 
+### `codnach` is structured — and carries the model **year**
+
+Empirically `codnach` decodes as `<prefix><YY><wheel><serial>`:
+
+| code | prefix | season | wheel | serial |
+|---|---|---|---|---|
+| `HA 2427813` | HA | 2024 | 27.5" | 813 |
+| `HA EB252750` | HAEB | 2025 | 27.5" | 750 |
+| `HA 1420209` | HA | 2014 | 20" | 209 |
+
+It parses on **100 % of the 4,171 articles with sales, company-wide** — not just the
+customers whose codes look tidy — and on 100 % of Halfords bike rows. The `EB`
+prefix is exactly `ebike = 1`. The decoded wheel is *better* than parsing `modnach`,
+whose `40x16T` is a sprocket count, not a wheel (they disagree on 7 % of rows and
+`codnach` is right every time).
+
+**The season digits matter more than they look.** The same bike gets a new code
+every year — `HA 2027813` and `HA 2227813` are the 2020 and 2022 ENTICE 17". So
+anything that groups by `article` across years reports the annual re-coding of the
+range as models dropped and replaced. Measured: year on year, **59 %** of a year's
+margin sits on articles that also sold the year before, but **72-80 %** sits on
+*design keys* (`prefix|wheel|serial`, season stripped) that did.
+
+`erp.design_key()` is that season-independent identity; `erp.load_sales` returns it
+as `design_key`. Use it for any year-over-year comparison of "the same bike". It is
+still a convention, not a constraint, so it falls back to the raw code when a
+article doesn't parse.
+
 ### Model cross-reference — `eurocycles_mfc.ModelList` (107 rows)
 Clean, curated: `codeMFC`, `codeEC` (= `nomachat.codnach`), `mark`, `model`,
 `gencod` (EAN/barcode), `bikeType`, `color`, `wheelSize`, `netWeight`,
@@ -410,6 +438,11 @@ maintenance-services entity — GMAO). The commercial finance in `eurocycles_db`
   model-code per season, e.g. `0.5% USD`) — **sales-commission cost**, feeds net margin.
 - `SDisputes` / `SDisputesLine` (1,305 / 8,630) — **customer disputes / debit notes**.
 - `DiscountPO` / `DiscountPOLine`, `facture.trem` — discounts given.
+- **`facture_remise` / `facture_remise_det` — the rebate the GPAO actually uses.**
+  A negotiated per-article price (`nprix`) valid over a date range for one
+  customer; the rebate is `qte·prx·cours − qte·nprix·cours` over invoices falling
+  in that range. This, not `trem`, is what `frmActiviteComp1.vb` subtracts from
+  its revenue totals. See `docs/gpao-parity.md`.
 
 ---
 
@@ -490,13 +523,139 @@ building against the restored local copy:
 | Tab | Built | Notes / dropped |
 |---|---|---|
 | **Actions** *(2026-09-04)* | the landing tab — a ranked to-do list, not a report: six rules over the other tabs' data, each item sized in DT on a stated basis and pointed at the tab holding the evidence | Rules: under-target margin, sold below build cost, YoY margin erosion on steady volume, the Halfords price-review shortlist, models selling into a shelf that no longer lists them, production orders left under plan. **`declarationprd.fermee` is unusable** — 25 of 16,248 orders carry it, all for 1-6 units — so the production rule ages orders against the data's own latest invoice instead. The loss rule requires `revenue > 0`: a line with COGS and no revenue is a sample, not a pricing decision. On the current restore 4 of 6 rules fire, ~DT 2.4M at stake. |
-| Overview | KPI strip (rev / margin / margin % / units / ASP, YoY), revenue & margin by year, revenue by distributor | — |
-| Models | best/worst by revenue·margin·margin %·**margin-per-bike**, **cost-vs-sale-price-per-bike scatter**, margin drift YoY, revenue-vs-margin, full table with cost/bike + margin/bike | **Planned-vs-realised (costing_nc) dropped** — realised `facture_det.mat` runs 10–70 % above `costing_nc` TotalG1 even same-year same-model, so the comparison only ever says "everything is over plan by ~40 %". Basis mismatch, not execution insight. `load_costing_years()` kept in `erp.py` for future use. |
+| Overview | KPI strip (rev / margin / margin % / units / ASP, YoY), revenue & margin by year, revenue by distributor, **margin bridge** *(2026-09-04)* | The bridge decomposes the YoY margin change into volume / mix / price / cost / new / dropped as an **exact identity** — the six effects sum to the change to the cent. Defaults to the `design_key` grain (see §4): at the `article` grain the seasonal re-coding swamps everything, with new+dropped running 6.8× the size of the actual change against 3.7× by design. Both compared years are trimmed to the same elapsed months when either is the part year — `like_for_like` only covers the newest pair, and the bridge lets the reader pick any two. |
+| Models | best/worst by revenue·margin·margin %·**margin-per-bike**, **cost-vs-sale-price-per-bike scatter**, margin drift YoY, revenue-vs-margin, full table with cost/bike + margin/bike, **per-model detail dialog** *(2026-09-21)* | **Planned-vs-realised (costing_nc) dropped** — realised `facture_det.mat` runs 10–70 % above `costing_nc` TotalG1 even same-year same-model, so the comparison only ever says "everything is over plan by ~40 %". Basis mismatch, not execution insight. `load_costing_years()` kept in `erp.py` for future use. The detail dialog (`views/management/model_detail.py`) pulls in a fourth satellite DB, `eurocycles_db_images` — see below. |
+
+## 12c. Reconciliation against the ERP's own report (2026-09-21)
+
+Checked our SQL against two exports of the ERP's own management reporting —
+`Classeur3.xlsx` (YTD 2026 vs YTD 2025 across 19 dimensions) and `Classeur2.xlsx`
+(monthly P&L). The headline result is a **bug in our own sales filter**.
+
+### `facture_det.typ` — `O` alone was wrong, it must be `O` + `I`
+
+`load_sales` filtered `d.typ = 'O' OR d.typ IS NULL`. That silently dropped
+`typ = 'I'`, which is **0.6–3.1 M DT of genuine bike revenue a year**:
+
+| | `O` | `I` | `N` | `S` | `P` |
+|---|---|---|---|---|---|
+| 2026 YTD revenue | 39.37 M | **2.56 M** | −15 k | 33 k | 0.3 k |
+| lines with COGS (2019+) | 26,767 / 26,811 | **668 / 671** | 0 / 1,900 | 0 / 439 | 63 / 134 |
+| articles | real | real | literal `xxx`/`XXX` | spare parts | spare parts |
+
+`I` goes to the same distributors (Halfords 5.1 M, MFC 1.8 M, JD Sports 1.0 M
+over 2019+), carries COGS at the same 99.6 % coverage as `O`, and **127 invoices
+contain both `O` and `I` lines** — so it is a line-level attribute, not a
+separate document series. `N`/`S`/`P` stay excluded: no COGS at all, and `N`'s
+articles are placeholders.
+
+Effect: 2026 revenue **39.4 M → 41.9 M (+6.5 %)**, units +9,468. Every tab moved.
+
+### After the fix, we match the ERP report to ~0.09 %
+
+| cut | ours | ERP report | delta |
+|---|---|---|---|
+| revenue by wheel size (§01) | 41,933,045 | 41,894,203 | **+0.09 %** |
+| units by wheel size (§02) | 136,498 | 136,733 | −0.17 % |
+| revenue by country (§06) | 41,933,045 | 41,893,690 | **+0.09 %** |
+
+Six wheel buckets (`26" Kids`, `14"`, `18"`, `12"`, `26x1-3/8`, `20 TR`) and six
+countries (Ireland, Germany, Ghana, Libya, Greece, Poland) match **to the dinar**.
+The residual sits in the report's own `PIECES DIVERS` / `Remise` buckets, which
+reclassify a handful of non-bike lines out of the wheel buckets — a presentation
+difference, not a data one.
+
+## 12d. The ERP margin is not the accounting margin
+
+The Overview's KPI strip shows `revenue − facture_det.mat`. That is **margin
+over standard material cost**, and it is roughly **five points above** the
+accounting gross margin. Over Jan–Jun 2026, company-wide:
+
+| | DT | % of revenue |
+|---|---:|---:|
+| Revenue — ERP | 32,525,872 | |
+| Revenue — pack | 32,520,011 | (agree to 0.02 %) |
+| Margin over material cost (ERP) | 10,362,679 | **31.9 %** |
+| Gross margin (pack) | 8,762,650 | **26.9 %** |
+
+Revenue agrees; the margins are simply different measures:
+
+- **ERP** — standard material cost × units sold. No packaging, no paint, no
+  inbound freight.
+- **Pack** — what was actually purchased, adjusted for stock movement, and it
+  does carry those. Over a short window the two also drift on timing alone:
+  what was bought in a month is not what was sold in it.
+
+Neither is wrong. The ERP figure is per-unit and consistent, so it is the right
+one for comparing models; the pack is the right one for what the company
+earned. The KPI tile is therefore labelled **"Margin over build cost"**, not
+"Gross margin", and the Overview carries a reconciliation expander so the two
+numbers on the page don't look like a contradiction.
+
+**And gross margin is not the bottom line.** Walking the pack down: gross 26.9 %
+→ less 19.5 % of revenue in operating costs → P.B.I.T **8.6 %** → after profit
+tax, **net 7.3 %**. A reader whose only headline was the 32.6 % tile would be
+out by a factor of four.
+
+### Payroll — `chargeprs` is the only P&L section that exists here
+
+Checked the whole of `Classeur2.xlsx` (the monthly P&L) against the database.
+**Only salaries are in the ERP.** `chargeprs` is a year × code matrix with a
+column per month (`m01`..`m12`), 105 rows; nothing else in any attached database
+carries the other sections (cost of sales, external services, taxes,
+depreciation, financial charges, other income). Searched for the `m01`-style
+shape and for `compta`/`ecriture`/`journal`/`bilan` tables — `chargeprs` is the
+only hit, and `rubriquest` is transport tariffs, not a chart of accounts. The
+rest of that pack comes from an accounting system that is not in this restore.
+
+The two code schemes differ, so `erp.PAYROLL_LINES` is the bridge:
+
+| `chargeprs.cod` | pack code | line | Jan–Jun 2026 |
+|---|---|---|---|
+| `001` | 10 | Wages | **exact** (1,823,818) |
+| `020` | 25 | Staff transport | **ERP empty**, pack has 44,991 |
+| `040` | 50 | CNSS | **exact** (627,678) |
+| `050` | 60 | Workwear | **exact** (75,251) |
+| `070` | 80 | Occupational health | **exact** (11,024) |
+| `080` | 90 | Social charges & other | 269,159 vs 280,785 (−11,626) |
+| `090` | 100 | Executive pay | **exact** (123,900) |
+
+Five of seven match to the dinar. The two gaps (44,991 + 11,626 = 56,617)
+account for the whole −1.9 % difference on the total, so it is a population gap
+in this restore, not a mapping error. `load_payroll` says so in its docstring
+and the Finance tab repeats it — the total is a floor.
+
+Months stored as `0` are dropped rather than plotted: the current year's
+unreached months are zeros and would otherwise draw a cliff to December.
+
+### Dimensions this added to `load_sales`
+
+- `wheel_size` — `nomachat.wheelnach` → `Wheelsize.libwheel` (17 rows). The ERP's
+  own buckets (`20"`, `27" 1/2`, `700C`), better than parsing `modnach`.
+- `country` — `facture.clif` → `client.pays` (233 rows). The **invoiced client's**
+  country, which is not the model's owning customer: a distributor can invoice
+  through an entity elsewhere.
+
+⚠️ **Both are mapped in pandas, not joined in SQL.** Added as `LEFT JOIN`s on
+`LTRIM(RTRIM(...))` they took `load_sales` from **0.7 s to 121 s** — neither key
+is indexed for that. The dimension tables are 17 and 233 rows; map them in memory.
+
+### `eurocycles_db_images.nomachat_img` — product photos (147 rows)
+
+One row per model, keyed on `code` = `nomachat.codnach` verbatim. Covers 129 of
+the ~4,171 articles with sales company-wide — most models have no photo, so
+callers (`erp.load_model_image`) must handle `None`.
+
+The blob isn't a raw image: it's gzip-compressed with an **undocumented 4-byte
+little-endian length prefix** ahead of the gzip stream — no column says so,
+confirmed empirically by decompressing and checking for a JPEG SOI marker
+(`FFD8FF..`). `extension` is always `NULL`; every sampled image decompresses to
+a JPEG regardless.
 | **Value chain** *(2026-09-04)* | the Halfords shelf against our build cost — per bike, in £, ex-VAT: KPI strip (retail value, our margin, their margin, our share), a three-way split of the retail price per model, an our-margin-vs-their-margin quadrant, the full table, and both sides' unmatched rows | The join is `crosswalk.py`, by **model name** + e-bike flag + wheel size — no shared identifier exists. **`codnach` is structured for this customer**: `<prefix><YY><wheel><serial>` parses on 100 % of Halfords bike rows, `EB` prefix ≡ `ebike = 1`, and its wheel beats the `modnach` text (whose `40x16T` is a sprocket). Covers **~98 % of Apollo units**; Apollo is ~82 % of Halfords volume, the rest Carrera/Indi/Trax which the Apollo-only scrape can't see. **No GBP rate exists in the ERP** (Halfords invoices in USD) so the tab carries its own rate control. **An exact-key join is not available**: `gencodnach` holds an EAN on most models, but Halfords publishes no GTIN anywhere — checked 2026-09-04 across the Bloomreach search API (any `fl`), the product page HTML/`ld+json`, and the `shopper-products` payload (~90 `c_` attributes, no `ean`/`upc`/`gtin`). That payload does carry `c_wheelsize`, `c_gender`, `c_framematerial`, `c_braketype`, `c_suspension`, `c_numberofgears`, `c_rearderailleur` and per-size `variants[]` — the same tokens `modnach` is built from, and a better narrowing key than an EAN would have been. |
 | Customers | per-customer scorecard (rev/margin/units/models/YoY), customer drill-down, **plan-vs-actual units** from `planningprev` (link `planningprev.client → client.codecli`) | **AR ageing dropped** — `reglement` has no customer FK in this copy. |
 | Production | plan attainment (`ordprevision` vs `declarationprd`) by week & brand, label throughput by brand (`eurocycles_label`), line-flow time (first→last frame label), produced-vs-invoiced (moved from Overview) | `OFTrace.sysCreatedDate` is first-print, not OF-creation → no true order lead time; framed as "line-flow" instead. `declarationprd.fermee` is `'Oui'/'Non'` text. |
 | Supply & cost | component price-change index & currency split (`hisprix`), biggest part moves, supplier spend + freight buckets (`facturef` ⋈ `fournisseur`), supplier claims by count (`SDisputes`), inbound PO pipeline by `eta` | **FG inventory valuation dropped** — `AccountingFinishedGoods.Stock` all 0 in this copy. **BOM-weighted per-model inflation not built** (stretch) — `nomachat_det` part ref (`codendach`) doesn't cleanly key to `hisprix.code`. `commandf.fermeecmdf` always 0 → forward `eta` is the "still awaited" proxy. Supplier master is **`fournisseur`** (852 rows, 100 % match), not `fourn`. |
-| Finance | billings vs collections (`reglement_det` cash-in, company-wide), commission cost estimate (`agent1` × `agent3` blended rate) → margin-after-commission | Lean by design. No customer-level AR; `previsions_tresorerie` (80 rows) not surfaced; `facture.trem` ≈ unpopulated so "discounts given" dropped. `agent3` = 3 agents × 13 categories, no model→category map, so commission is a blended-rate estimate. |
+| Finance | billings vs collections (`reglement_det` cash-in, company-wide), commission cost estimate (`agent1` × `agent3` blended rate) → margin-after-commission | Lean by design. No customer-level AR; `previsions_tresorerie` (80 rows) not surfaced; `facture.trem` ≈ unpopulated so "discounts given" dropped — **this was the wrong column**: the GPAO reads `facture_remise`/`facture_remise_det`, now wired in `gpao_activity.load_remise` (see `docs/gpao-parity.md`). `agent3` = 3 agents × 13 categories, no model→category map, so commission is a blended-rate estimate. |
 
 Satellite DBs needed: `eurocycles_db_calc` (Supply component inflation), `eurocycles_label`
 (Production throughput/flow). Tabs degrade to a "restore it" notice when absent

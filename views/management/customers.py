@@ -16,13 +16,13 @@ HALFORDS = "HALFORDS"
 
 
 def render(scope: pd.DataFrame, ctx: Ctx) -> None:
-    st.subheader(f"Customer scorecard — {ctx.yr_lo}–{ctx.yr_hi}")
+    st.subheader(ctx.t("Customer scorecard") + f" — {ctx.yr_lo}–{ctx.yr_hi}")
 
     live = scope[scope["distributor"] != "(unmapped)"]
     yrs = sorted(live["yr"].unique())
     board = _scorecard(live, yrs, ctx)
     if board.empty:
-        st.info("No customer rows in range.")
+        st.info(ctx.t("No customer rows in range."))
         return
     yoy_label = "YoY"
     if len(yrs) >= 2:
@@ -36,7 +36,7 @@ def render(scope: pd.DataFrame, ctx: Ctx) -> None:
     st.dataframe(
         board_disp, hide_index=True, width="stretch",
         column_config={
-            "distributor": "Customer",
+            "distributor": ctx.t("Customer"),
             "revenue": st.column_config.NumberColumn(f"Revenue ({ctx.ccy})", format="compact"),
             "margin": st.column_config.NumberColumn(f"Margin ({ctx.ccy})", format="compact"),
             "margin_pct": st.column_config.NumberColumn("Margin %", format="%.1f%%"),
@@ -52,8 +52,53 @@ def render(scope: pd.DataFrame, ctx: Ctx) -> None:
     note = partial_year_note(ctx)
     st.caption(caption + (f" {note}" if note else ""))
 
+    _by_country(scope, ctx)
+
     st.divider()
     _drilldown(live, ctx, board["distributor"].tolist())
+
+
+# ------------------------------------------------------------- by country ---
+def _by_country(scope: pd.DataFrame, ctx: Ctx) -> None:
+    """Revenue per destination country — the ERP report's §06 cut.
+
+    Country is the *invoiced client's* country (`client.pays` via
+    `facture.clif`), not the model's owning customer, so it answers "where did
+    the bikes ship" rather than "who designed them". The two differ whenever a
+    distributor invoices through an entity in another country."""
+    st.divider()
+    st.subheader(ctx.t("Revenue by country"))
+    known = scope[scope["country"] != "(unknown)"]
+    if known.empty:
+        st.caption(ctx.t("No country on the invoiced clients in range."))
+        return
+    st.caption(ctx.tf("{lo}–{hi} cumulative, by the invoiced client's country "
+                      "(`client.pays`). Label is the share of period revenue.",
+                      lo=ctx.yr_lo, hi=ctx.yr_hi))
+    g = (known.groupby("country")
+         .agg(revenue=("line_rev_dt", "sum"), margin=("line_margin_dt", "sum"),
+              units=("qte", "sum"))
+         .sort_values("revenue").tail(14))
+    g["rev_disp"] = to_disp(g["revenue"], ctx)
+    g["share"] = g["revenue"] / known["line_rev_dt"].sum() * 100
+    g["mpct"] = np.where(g["revenue"] > 0, g["margin"] / g["revenue"] * 100, np.nan)
+
+    P = ctx.P
+    fig = go.Figure()
+    fig.add_bar(
+        x=g["rev_disp"], y=hbar_categories(fig, g.index), orientation="h",
+        marker=dict(color=P["series"][0], line=dict(width=0)),
+        text=[f"{compact(v, ctx.ccy)}   {s:.0f}%" for v, s in zip(g["rev_disp"], g["share"])],
+        textposition="outside",
+        textfont=dict(color=P["text_secondary"], size=11, family=FONT),
+        customdata=g[["units", "mpct"]].to_numpy(),
+        hovertemplate="<b>%{y}</b><br>" + sym(ctx.ccy) + "%{x:,.0f}<br>"
+                      "%{customdata[0]:,.0f} units · %{customdata[1]:.1f}% margin<extra></extra>",
+        cliponaxis=False)
+    style_fig(fig, height=max(260, 27 * len(g) + 50), xgrid=True, ygrid=False)
+    fig.update_xaxes(tickformat="~s")
+    fig.update_layout(margin=dict(l=4, r=96, t=4, b=4), bargap=0.35)
+    st.plotly_chart(fig, width="stretch", theme=None)
 
 
 def _scorecard(live: pd.DataFrame, yrs: list, ctx: Ctx) -> pd.DataFrame:
@@ -95,10 +140,10 @@ def _scorecard(live: pd.DataFrame, yrs: list, ctx: Ctx) -> pd.DataFrame:
 def _drilldown(live: pd.DataFrame, ctx: Ctx, names: list) -> None:
     P = ctx.P
     default = HALFORDS if HALFORDS in names else names[0]
-    who = st.selectbox("Customer detail", names, index=names.index(default))
+    who = st.selectbox(ctx.t("Customer detail"), names, index=names.index(default))
     d = live[live["distributor"] == who]
     if d.empty:
-        st.caption("No rows.")
+        st.caption(ctx.t("No rows."))
         return
 
     ya = d.groupby("yr").agg(revenue=("line_rev_dt", "sum"), margin=("line_margin_dt", "sum"),
@@ -107,15 +152,15 @@ def _drilldown(live: pd.DataFrame, ctx: Ctx, names: list) -> None:
 
     left, right = st.columns([3, 2])
     with left:
-        st.markdown(f"**{who} — revenue & margin by year**")
+        st.markdown("**" + ctx.tf("{who} — revenue & margin by year", who=who) + "**")
         fig = go.Figure()
-        fig.add_bar(x=ya.index, y=to_disp(ya["revenue"], ctx), name="Revenue",
+        fig.add_bar(x=ya.index, y=to_disp(ya["revenue"], ctx), name=ctx.t("Revenue"),
                     marker=dict(color=P["series"][0], line=dict(width=0)),
                     hovertemplate="<b>%{x}</b><br>" + sym(ctx.ccy) + "%{y:,.0f}<extra></extra>")
-        fig.add_bar(x=ya.index, y=to_disp(ya["margin"], ctx), name="Gross margin",
+        fig.add_bar(x=ya.index, y=to_disp(ya["margin"], ctx), name=ctx.t("Gross margin"),
                     marker=dict(color=P["series"][2], line=dict(width=0)),
                     hovertemplate="<b>%{x}</b><br>" + sym(ctx.ccy) + "%{y:,.0f}<extra></extra>")
-        fig.add_trace(go.Scatter(x=ya.index, y=ya["margin_pct"], name="Margin %", yaxis="y2",
+        fig.add_trace(go.Scatter(x=ya.index, y=ya["margin_pct"], name=ctx.t("Margin %"), yaxis="y2",
                                  mode="lines+markers", line=dict(color=P["series"][3], width=2),
                                  marker=dict(size=7),
                                  hovertemplate="<b>%{x}</b><br>%{y:.1f}%<extra></extra>"))
@@ -129,7 +174,7 @@ def _drilldown(live: pd.DataFrame, ctx: Ctx, names: list) -> None:
         st.plotly_chart(fig, width="stretch", theme=None)
 
     with right:
-        st.markdown("**Top models**")
+        st.markdown(ctx.t("**Top models**"))
         tm = (d.groupby("article").agg(model=("model_label", "first"),
                                        revenue=("line_rev_dt", "sum"),
                                        margin=("line_margin_dt", "sum"))
@@ -154,20 +199,20 @@ def _drilldown(live: pd.DataFrame, ctx: Ctx, names: list) -> None:
 
 
 def _plan_vs_actual(who: str, ctx: Ctx) -> None:
-    st.markdown("**Shipment plan vs invoiced (units)**")
+    st.markdown(ctx.t("**Shipment plan vs invoiced (units)**"))
     pva = erp.load_plan_vs_actual(start_year=min(ctx.yr_lo, 2022))
     d = pva[(pva["distributor"] == who)
             & (pva["month"].dt.year >= ctx.yr_lo) & (pva["month"].dt.year <= ctx.yr_hi)]
     if d.empty or d["planned_qty"].sum() == 0:
-        st.caption(f"No `planningprev` demand plan on file for {who} in range.")
+        st.caption(ctx.tf("No `planningprev` demand plan on file for {who} in range.", who=who))
         return
     m = d.groupby("month").agg(planned=("planned_qty", "sum"), actual=("actual_qty", "sum")).reset_index()
     P = ctx.P
     fig = go.Figure()
-    fig.add_bar(x=m["month"], y=m["planned"], name="Planned",
+    fig.add_bar(x=m["month"], y=m["planned"], name=ctx.t("Planned"),
                 marker=dict(color=P["series"][3], line=dict(width=0)),
                 hovertemplate="<b>%{x|%b %Y}</b><br>plan %{y:,.0f}<extra></extra>")
-    fig.add_bar(x=m["month"], y=m["actual"], name="Invoiced",
+    fig.add_bar(x=m["month"], y=m["actual"], name=ctx.t("Invoiced"),
                 marker=dict(color=P["series"][0], line=dict(width=0)),
                 hovertemplate="<b>%{x|%b %Y}</b><br>actual %{y:,.0f}<extra></extra>")
     style_fig(fig, height=300)
@@ -175,6 +220,9 @@ def _plan_vs_actual(who: str, ctx: Ctx) -> None:
     st.plotly_chart(fig, width="stretch", theme=None)
     tot_plan, tot_act = m["planned"].sum(), m["actual"].sum()
     att = tot_act / tot_plan * 100 if tot_plan else np.nan
-    st.caption(f"Plan {tot_plan:,.0f} · invoiced {tot_act:,.0f} · attainment **{att:.0f}%** "
-               f"({ctx.yr_lo}–{ctx.yr_hi}). Plan = `planningprev_det` by planned week; "
-               "invoiced = `facture_det` by invoice month. Monthly buckets, not lead-time aligned.")
+    st.caption(ctx.tf("Plan {plan} · invoiced {act} · attainment **{att}%** "
+                      "({lo}–{hi}). Plan = `planningprev_det` by planned week; "
+                      "invoiced = `facture_det` by invoice month. Monthly buckets, "
+                      "not lead-time aligned.",
+                      plan=f"{tot_plan:,.0f}", act=f"{tot_act:,.0f}", att=f"{att:.0f}",
+                      lo=ctx.yr_lo, hi=ctx.yr_hi))
