@@ -91,7 +91,16 @@ def _odbc_string(db: str = MAIN_DB) -> str:
 def _engine(db: str = MAIN_DB):
     from sqlalchemy import create_engine
     url = "mssql+pyodbc:///?odbc_connect=" + quote_plus(_odbc_string(db))
-    return create_engine(url, pool_pre_ping=True)
+    # This app is read-only against what may be the live ERP instance (no
+    # RCSI there — see docs/eurocycles-erp-findings.md). READ UNCOMMITTED
+    # keeps our long analytical SELECTs from taking/waiting on locks against
+    # the ERP's own writers; every result here is cached 30-60 min anyway, so
+    # a possible dirty read costs nothing. Pool is kept small since this is a
+    # reporting tool, not a high-concurrency app.
+    return create_engine(
+        url, pool_pre_ping=True, pool_size=2, max_overflow=3,
+        isolation_level="READ UNCOMMITTED",
+    )
 
 
 @lru_cache(maxsize=1)

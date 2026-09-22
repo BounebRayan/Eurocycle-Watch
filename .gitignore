@@ -5,3 +5,4 @@ data/*.db
 # disk, can't run the scraper) has data, and the daily GitHub Action commits it.
 !data/apollo_dashboard.db
 *.log
+.streamlit/secrets.toml
