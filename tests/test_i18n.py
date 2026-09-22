@@ -57,7 +57,8 @@ def _translated_strings() -> set[str]:
     for path in (sorted(VIEWS.glob("*.py"))
                  + [ROOT / "erp.py", ROOT / "finance_pack.py", ROOT / "gpao_activity.py",
                     ROOT / "gpao_landed.py", ROOT / "gpao_requote.py",
-                    ROOT / "gpao_exchange.py"]):
+                    ROOT / "gpao_exchange.py", ROOT / "gpao_stock.py",
+                    ROOT / "bike_builder.py"]):
         V().visit(ast.parse(path.read_text(encoding="utf-8")))
     return found
 

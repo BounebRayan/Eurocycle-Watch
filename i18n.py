@@ -56,12 +56,18 @@ def t(s: str, lang: str = DEFAULT_LANG) -> str:
     return _catalogue(lang).get(s, s)
 
 
-def tf(s: str, lang: str = DEFAULT_LANG, **kwargs) -> str:
+def tf(s: str, lang: str = DEFAULT_LANG, /, **kwargs) -> str:
     """Translate a template, then fill its named placeholders.
 
     A translation that mistypes a placeholder would otherwise raise `KeyError`
     mid-render and blank the tab, so a bad fill falls back to the English
-    template rather than taking the page down with it."""
+    template rather than taking the page down with it.
+
+    `s` and `lang` are positional-only so that a template using `{s}` or
+    `{lang}` as a placeholder name fills it instead of colliding with the
+    parameter — which fails at call time with a `TypeError` that names the
+    placeholder rather than the template, and so reads like anything but the
+    real cause."""
     try:
         return t(s, lang).format(**kwargs)
     except (KeyError, IndexError, ValueError):

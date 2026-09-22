@@ -1,4 +1,4 @@
-"""Actions tab — the to-do list, not a report.
+"""Actions — the to-do list, not a report.
 
 Every other tab answers "what happened". This one answers "what should someone
 do about it on Monday". It runs a fixed set of rules over the same data the
@@ -9,8 +9,16 @@ Two deliberate constraints:
 
 * **Every item names the money at stake**, on a stated basis, so the list can be
   worked top-down. A rule that can't be sized in money doesn't belong here.
-* **Every item says which tab explains it.** This tab is the index; the evidence
-  stays where it already lives.
+* **Every item says which tab explains it.** This is the index; the evidence
+  stays where it already lives. `_EVIDENCE` maps a rule's tab to the page that
+  now holds it, so the pointer is a link rather than a sentence.
+
+Rendering is split three ways because there are two readers at two altitudes:
+the **Actions page** draws `summary` + `blocks` (every finding, with its table),
+while the **Overview page** draws `compact_list` (the top few as one-line rows).
+Both get their list from `findings()`, so the two can never disagree about what
+is on it or what it is worth. Only one page runs per script run, so this is
+about there being a single definition — not about avoiding double work.
 
 Adding a rule means writing a `_rule_*` function that returns a `Finding`, and
 adding it to `RULES`. Nothing else changes — the page ranks and renders whatever
@@ -28,6 +36,7 @@ import streamlit as st
 import crosswalk
 import erp
 import gpao_exchange
+from . import _export
 from ._common import Ctx, TILE_H, money, tile, to_disp
 from . import valuechain
 
@@ -38,6 +47,12 @@ TARGET_MARGIN_PCT = 25.0
 # Volume floors. A 12-unit sample line breaking a margin rule is noise, and a
 # list that surfaces it gets ignored wholesale.
 MIN_UNITS_MARGIN = 200
+
+# Build-from-stock sizing. The batch is what the tab opens on; the shortlist is
+# how deep the engine goes before ranking. Both only affect how the rule is
+# sized, never whether the stock is really sitting there.
+DEAD_STOCK_BATCH = 100
+DEAD_STOCK_SHORTLIST = 40
 MIN_UNITS_LOSS = 50
 MIN_PLANNED_UNITS = 500
 
@@ -69,27 +84,45 @@ class Finding:
     columns: dict = field(default_factory=dict)
 
 
-def render(scope: pd.DataFrame, ctx: Ctx) -> None:
-    st.subheader(ctx.t("What needs attention") + f" — {ctx.dist_label}, {ctx.yr_lo}–{ctx.yr_hi}")
+# Which of the six Management pages now holds each rule's evidence tab. The
+# rules keep naming a *tab*, because that is what a reader recognises on arrival;
+# this is the only place that knows which page it ended up on.
+_EVIDENCE = {
+    "Models": "commercial",
+    "Value chain": "commercial",
+    "Production": "operations",
+    "Build from stock": "operations",
+    "Re-quotation": "costing",
+}
 
-    findings: list[Finding] = []
+
+def findings(scope: pd.DataFrame, ctx: Ctx) -> list[Finding]:
+    """Run every rule, drop the ones that found nothing, rank by money at stake.
+
+    A rule that raises is reported and skipped — one broken rule must not take
+    the page down with it."""
+    out: list[Finding] = []
     for rule in RULES:
         try:
             f = rule(scope, ctx)
-        except Exception as e:                      # one broken rule must not
-            st.warning(f"Rule `{rule.__name__}` failed: {e}")   # take the page down
+        except Exception as e:
+            st.warning(f"Rule `{rule.__name__}` failed: {e}")
             continue
         if f is not None and not f.items.empty:
-            findings.append(f)
+            out.append(f)
+    out.sort(key=lambda f: f.value_dt, reverse=True)
+    return out
 
-    if not findings:
-        st.success(ctx.t("**Nothing is breaking a threshold in this period.** "
-                   "Widen the year range or lower the filters if that reads too quiet."))
-        return
 
-    findings.sort(key=lambda f: f.value_dt, reverse=True)
-    total = sum(f.value_dt for f in findings)
-    items = sum(len(f.items) for f in findings)
+def nothing_found(ctx: Ctx) -> None:
+    st.success(ctx.t("**Nothing is breaking a threshold in this period.** "
+                     "Widen the year range or lower the filters if that reads too quiet."))
+
+
+def summary(found: list[Finding], ctx: Ctx) -> None:
+    """The three tiles over the list: how much, how many, how many rules."""
+    total = sum(f.value_dt for f in found)
+    items = sum(len(f.items) for f in found)
 
     c1, c2, c3 = st.columns(3)
     c1.metric(ctx.t("Open items"), f"{items:,}", border=True, height=TILE_H,
@@ -98,21 +131,89 @@ def render(scope: pd.DataFrame, ctx: Ctx) -> None:
               help=f"{money(total, ctx)} — the sum of every item's sizing. Each rule "
                    "states its own basis; they are not all the same kind of money, so "
                    "read this as an order of magnitude, not a forecast.")
-    c3.metric(ctx.t("Rules triggered"), f"{len(findings)} of {len(RULES)}", border=True, height=TILE_H)
+    c3.metric(ctx.t("Rules triggered"), f"{len(found)} of {len(RULES)}",
+              border=True, height=TILE_H)
 
+
+def export(found: list[Finding], ctx: Ctx) -> None:
+    """The whole list as one workbook: an index sheet, then a sheet per rule.
+
+    The index carries each rule's own basis line, because the sizings are not
+    all the same kind of money and a column of totals with no basis beside them
+    invites exactly the addition the page warns against."""
+    index = pd.DataFrame([{
+        ctx.t("Finding"): f.title,
+        ctx.t("At stake") + f" ({ctx.ccy})": to_disp(f.value_dt, ctx),
+        ctx.t("Items"): len(f.items),
+        ctx.t("Basis"): f.basis,
+        ctx.t("Evidence"): f.tab,
+    } for f in found])
+
+    sheets = {ctx.t("All findings"): index}
+    for f in found:
+        sheets[f.title] = f.items
+
+    _export.download(
+        ctx.t("Download the to-do list"), sheets,
+        f"actions_{ctx.yr_lo}-{ctx.yr_hi}.xlsx", ctx=ctx,
+        title=ctx.t("What needs attention"), key="act_list_xlsx",
+        meta=_export.scope_meta(ctx),
+        notes=[ctx.t("Each rule sizes its items on its own basis, stated on the index "
+                     "sheet. They are not all the same kind of money, so the column "
+                     "totals to an order of magnitude, not to a forecast."),
+               ctx.t("Only rows breaking a threshold are listed, and each sheet is "
+                     "capped at the 25 largest. The tab each finding names holds the "
+                     "full working.")])
+
+
+def blocks(found: list[Finding], ctx: Ctx) -> None:
+    """The full list: one block per finding, with its evidence table."""
     st.caption(ctx.t("Ranked by money at stake. Each block says how that number was arrived at "
                "and which tab holds the evidence — this page is the index, not the analysis."))
 
-    for f in findings:
+    for f in found:
         st.divider()
         left, right = st.columns([3, 1])
         left.markdown(f"### {f.title}")
         right.metric(ctx.t("At stake"), tile(f.value_dt, ctx), border=True,
                      label_visibility="collapsed")
         st.markdown(f"{f.why}")
-        st.caption(ctx.tf("**{n} items** · {basis} · evidence: **{tab}** tab",
-                          n=len(f.items), basis=f.basis, tab=f.tab))
+        st.caption(ctx.tf("**{n} items** · {basis}", n=len(f.items), basis=f.basis))
+        _evidence_link(f, ctx)
         st.dataframe(f.items, hide_index=True, width="stretch", column_config=f.columns)
+
+
+def compact_list(found: list[Finding], ctx: Ctx, *, n: int = 5) -> None:
+    """The top few as one-line rows — the Overview page's copy.
+
+    No tables and no `why` paragraphs: on the landing page these are pointers,
+    and the row's job is to be worth a click. The ranking and the sizing are the
+    same ones the Actions page shows, because they come from the same list."""
+    for f in found[:n]:
+        row = st.container(border=True)
+        left, mid, right = row.columns([4, 2, 2], vertical_alignment="center")
+        left.markdown(f"**{f.title}**")
+        left.caption(ctx.tf("{n} items · {basis}", n=len(f.items), basis=f.basis))
+        mid.metric(ctx.t("At stake"), tile(f.value_dt, ctx),
+                   label_visibility="collapsed", border=False)
+        with right:
+            _evidence_link(f, ctx)
+
+
+def _evidence_link(f: Finding, ctx: Ctx) -> None:
+    """A real link to the page holding this finding's evidence tab.
+
+    Falls back to naming the tab in prose when a new rule points at a tab that
+    isn't in `_EVIDENCE` yet — a missing entry should read as a slightly duller
+    caption, not as a crash on the landing page."""
+    from . import _nav
+
+    key = _EVIDENCE.get(f.tab)
+    if key is None:
+        st.caption(ctx.tf("Evidence: the **{tab}** tab", tab=f.tab))
+        return
+    _nav.link(key, ctx, tab=f.tab,
+              label=ctx.tf("Evidence: {tab}", tab=ctx.t(f.tab)))
 
 
 # --------------------------------------------------------------- helpers ---
@@ -473,6 +574,75 @@ def _rule_requote(scope: pd.DataFrame, ctx: Ctx) -> Finding | None:
                  "exposure": _money_col(f"Exposure ({ctx.ccy})")})
 
 
+
+def _rule_dead_stock(scope: pd.DataFrame, ctx: Ctx) -> Finding | None:
+    """Unmoved stock that a buildable bike could consume.
+
+    Every other rule here is about money the business is losing on bikes it is
+    already making. This one is about money it has already spent: parts bought,
+    paid for, and then never issued or reserved. They sit at full cost on the
+    balance sheet and earn nothing.
+
+    The sizing is deliberately the **post-allocation** figure. Proposals compete
+    for the same frames, so summing what each one wants roughly doubles the
+    prize — on the current pool, DT 2.2M of demand against DT 1.0M that could
+    actually be cleared. A to-do list ranked on the standalone total would sit
+    above rules that are sized honestly. See `bike_builder.allocate`.
+    """
+    import bike_builder as B
+    import gpao_stock as S
+
+    asof = S.ledger_end()
+    if asof is None:
+        return None
+    # The same window the tab opens on, so the two agree without the reader
+    # having to reconcile them.
+    since = pd.Timestamp(f"{asof.year - 2}-01-01")
+
+    pool = B.stock_pool(asof, since)
+    if pool.empty:
+        return None
+
+    _, port = B.dead_stock_portfolio(asof, since, batch=DEAD_STOCK_BATCH,
+                                     shortlist=DEAD_STOCK_SHORTLIST)
+    if port.realisable_dt <= 0 or port.allocated.empty:
+        return None
+
+    good = port.allocated[port.allocated["realisable_dt"] > port.allocated["buy_alloc_dt"]]
+    if good.empty:
+        return None
+
+    out = good.head(25)[["model", "model_name", "tier", "realisable_dt",
+                         "buy_alloc_dt", "ratio", "swaps", "max_lead_days"]].copy()
+    out["realisable_dt"] = to_disp(out["realisable_dt"], ctx)
+    out["buy_alloc_dt"] = to_disp(out["buy_alloc_dt"], ctx)
+
+    total = float(pool["value_dt"].sum())
+    return Finding(
+        key="dead_stock",
+        title="Unmoved stock that could be built into bikes",
+        why=f"DT {total:,.0f} of parts have not been issued or reserved since "
+            f"{since:%b %Y}, and most of that value is a part a live bike still calls "
+            f"for. These {len(good)} models each clear more stock than they cost to "
+            f"finish, at {DEAD_STOCK_BATCH} bikes a run — the parts are bought and paid "
+            "for, so the only new money is the bought tail. Check the lead times before "
+            "committing: the tail is cheap but some of it is 90 days out. "
+            "This figure is the substitution route, which clears stock against orders "
+            "that already exist; the tab leads with specifying a **new** bike out of "
+            "the shelf, which is where a sale rather than a cost saving comes from.",
+        basis="stock cleared after allocation, less the bought tail scaled to the share "
+              "of parts each proposal actually wins",
+        tab="Build from stock", items=out,
+        value_dt=float(good["realisable_dt"].sum() - good["buy_alloc_dt"].sum()),
+        columns={"model": "Model", "model_name": "Name", "tier": "Tier",
+                 "realisable_dt": st.column_config.NumberColumn(
+                     f"Cleared ({ctx.ccy})", format="%.0f"),
+                 "buy_alloc_dt": st.column_config.NumberColumn(
+                     f"Buy ({ctx.ccy})", format="%.0f"),
+                 "ratio": st.column_config.NumberColumn("Cleared per DT", format="%.1f×"),
+                 "swaps": st.column_config.NumberColumn("Swaps", format="%d"),
+                 "max_lead_days": st.column_config.NumberColumn("Lead (days)", format="%.0f")})
+
 RULES: list[Callable[[pd.DataFrame, Ctx], Finding | None]] = [
     _rule_below_target,
     _rule_loss_making,
@@ -481,4 +651,5 @@ RULES: list[Callable[[pd.DataFrame, Ctx], Finding | None]] = [
     _rule_price_rise,
     _rule_delisted,
     _rule_attainment,
+    _rule_dead_stock,
 ]

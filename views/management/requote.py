@@ -25,6 +25,7 @@ import streamlit as st
 
 import gpao_requote as R
 from theme import style_fig
+from . import _export
 from ._common import Ctx, TILE_H, sym, to_disp, compact
 
 TOP_N = 25
@@ -176,6 +177,23 @@ def _model_table(req: pd.DataFrame, ctx: Ctx) -> None:
     d = d.head(TOP_N).copy()
     for c in ("cost_dt", "requote_dt", "ecart", "sell_dt"):
         d[c] = to_disp(d[c], ctx)
+
+    # The whole re-quote, not the top slice on screen — the sort is a reading
+    # aid, and someone working this list wants every model in it.
+    full = req.copy()
+    for c in ("cost_dt", "requote_dt", "ecart", "sell_dt"):
+        full[c] = to_disp(full[c], ctx)
+    _export.download(
+        ctx.tf("Download all {n} re-quoted models", n=f"{len(full):,}"),
+        {ctx.t("Re-quoted models"): full},
+        "re-quotation.xlsx", ctx=ctx, title=ctx.t("Re-quotation"), key="rq_xlsx",
+        meta=_export.scope_meta(ctx),
+        notes=[ctx.t("Company-wide: this report sets its own year and does not follow "
+                     "the sidebar's Distributor or Bikes only filters."),
+               ctx.t("Use the like-for-like column, not the raw one. The raw gap also "
+                     "moves when a bill of materials gains or loses a line, so it is "
+                     "not a pure price movement; the like-for-like column compares "
+                     "only the components present in both readings.")])
 
     st.dataframe(
         d[["article", "libnach", "cost_dt", "requote_dt", "ecart_pct",

@@ -22,7 +22,7 @@ pytestmark = pytest.mark.skipif(not YEARS, reason="no pack in data/finance/")
 def test_walk_ties_to_the_packs_own_totals(year):
     """Our revenue → net walk must land on the pack's printed P.B.I.T, tax and
     Total Net. If it doesn't, the sheet's layout moved and the figures on the
-    Overview are no longer the pack's figures."""
+    Finance page's P&L tab are no longer the pack's figures."""
     assert fp.check(year) == []
 
 

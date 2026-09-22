@@ -34,8 +34,11 @@ class Ctx:
         """Translate a string into the selected language."""
         return i18n.t(s, self.lang)
 
-    def tf(self, s: str, **kwargs) -> str:
-        """Translate a template, then fill its named placeholders."""
+    def tf(self, s: str, /, **kwargs) -> str:
+        """Translate a template, then fill its named placeholders.
+
+        `s` is positional-only so a template can use `{s}` as a placeholder
+        without colliding with the parameter name."""
         return i18n.tf(s, self.lang, **kwargs)
 
     @property
@@ -57,22 +60,54 @@ class Ctx:
         """Last month with data (1-12)."""
         return 12 if self.data_end is None or pd.isna(self.data_end) else int(self.data_end.month)
 
+    @property
+    def ytd_day(self) -> int:
+        """Day of month the data stops on (1-31).
+
+        Needed because the last month is usually a part month: trimming a
+        comparison to whole months still lands 19 days of one August against a
+        full one. See `like_for_like`."""
+        return 31 if self.data_end is None or pd.isna(self.data_end) else int(self.data_end.day)
+
+
+def trim_to_date(df: pd.DataFrame, ctx: Ctx) -> pd.Series:
+    """Rows on or before the data's own cut-off day, within their own year.
+
+    Compares month-then-day rather than building a date, so 29 February in a
+    leap year needs no special case."""
+    m, d = df["datf"].dt.month, df["datf"].dt.day
+    return (m < ctx.ytd_month) | ((m == ctx.ytd_month) & (d <= ctx.ytd_day))
+
 
 def like_for_like(df: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
     """Trim the partial newest year *and its comparison year* to the same
-    elapsed months, so a year-over-year delta compares like with like.
+    elapsed **days**, so a year-over-year delta compares like with like.
 
     Without this, an eight-month 2026 lands against a full 2025 and every YoY
     reads as a collapse. Returns `df` untouched when the newest year is complete.
 
+    Trimming to whole months is not enough, and that is the subtle half: the
+    newest month is itself usually a part month. On data ending 19 Aug 2026, a
+    month-level cut compared 19 days of August 2026 against all 31 days of
+    August 2025 — DT 2.0M of prior-year revenue with no counterpart, which
+    overstated the revenue decline by 1.6 points and made the caption's promise
+    that "a part year isn't measured against a full one" untrue of the part
+    month. The cut is therefore the data's own day, in both years.
+
     Use it **only** for the delta, never for displayed totals — it would shrink
-    the prior year's headline figures too. Needs `yr` and `mo` columns
-    (`erp.load_sales` provides both)."""
+    the prior year's headline figures too. Needs `yr` and `datf`
+    (`erp.load_sales` provides both); falls back to a month-level cut for a
+    frame that carries `mo` but no dates."""
     p = ctx.partial_year
-    if p is None or "mo" not in df.columns:
+    if p is None:
         return df
+    if "datf" not in df.columns:
+        if "mo" not in df.columns:
+            return df
+        affected = df["yr"].isin([p, p - 1])
+        return df[~affected | (df["mo"] <= ctx.ytd_month)]
     affected = df["yr"].isin([p, p - 1])
-    return df[~affected | (df["mo"] <= ctx.ytd_month)]
+    return df[~affected | trim_to_date(df, ctx)]
 
 
 def partial_year_note(ctx: Ctx) -> str | None:
@@ -80,11 +115,11 @@ def partial_year_note(ctx: Ctx) -> str | None:
     p = ctx.partial_year
     if p is None:
         return None
-    month = ctx.data_end.strftime("%B")
-    return ctx.tf("{yr} runs to {end}. Year-on-year figures compare January–{month} {yr} "
-                  "against January–{month} {prev}, so a part year isn't measured against "
-                  "a full one. Totals shown elsewhere are the full period.",
-                  yr=p, end=f"{ctx.data_end:%d %b %Y}", month=month, prev=p - 1)
+    return ctx.tf("{yr} runs to {end}. Year-on-year figures compare 1 January–{cut} in "
+                  "both years, so neither a part year nor a part month is measured "
+                  "against a full one. Totals shown elsewhere are the full period.",
+                  yr=p, end=f"{ctx.data_end:%d %b %Y}", cut=f"{ctx.data_end:%d %B}",
+                  prev=p - 1)
 
 
 def sym(ccy: str) -> str:

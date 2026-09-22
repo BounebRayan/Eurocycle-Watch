@@ -1,5 +1,5 @@
 requests
-streamlit
+streamlit>=1.63          # persist_state= and st.tabs(on_change=) — see views/management/_shell.py
 pandas
 plotly
 playwright

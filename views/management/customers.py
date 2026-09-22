@@ -15,7 +15,40 @@ from ._common import Ctx, sym, to_disp, compact, like_for_like, partial_year_not
 HALFORDS = "HALFORDS"
 
 
+# ------------------------------------------------------- by distributor ---
+def _revenue_by_distributor(scope: pd.DataFrame, ctx: Ctx) -> None:
+    """Revenue per distributor, cumulative over the sidebar's year range.
+
+    Came over from the old Overview tab with the page split: it is a cut of
+    the same customer dimension the scorecard below works in, and a reader
+    asking "who buys from us" wants both at once."""
+    P = ctx.P
+    st.subheader(ctx.t("Revenue by distributor"))
+    st.caption(ctx.tf("{lo}–{hi} cumulative. Top {n}.", lo=ctx.yr_lo, hi=ctx.yr_hi, n=12))
+    bd = (scope.groupby("distributor")
+          .agg(revenue=("line_rev_dt", "sum"), margin=("line_margin_dt", "sum"))
+          .sort_values("revenue").tail(12))
+    bd["rev_disp"] = to_disp(bd["revenue"], ctx)
+    bd["mpct"] = np.where(bd["revenue"] > 0, bd["margin"] / bd["revenue"] * 100, 0)
+    fig2 = go.Figure()
+    fig2.add_bar(
+        x=bd["rev_disp"], y=hbar_categories(fig2, bd.index), orientation="h",
+        marker=dict(color=P["series"][0], line=dict(width=0)),
+        text=[compact(v, ctx.ccy) for v in bd["rev_disp"]], textposition="outside",
+        textfont=dict(color=P["text_secondary"], size=11, family=FONT),
+        customdata=bd[["mpct"]].to_numpy(),
+        hovertemplate="<b>%{y}</b><br>" + sym(ctx.ccy) +
+                      "%{x:,.0f}<br>margin %{customdata[0]:.1f}%<extra></extra>",
+        cliponaxis=False)
+    style_fig(fig2, height=360, xgrid=True, ygrid=False)
+    fig2.update_xaxes(tickformat="~s")
+    fig2.update_layout(margin=dict(l=4, r=54, t=4, b=4), bargap=0.35)
+    st.plotly_chart(fig2, width="stretch", theme=None)
+
+
 def render(scope: pd.DataFrame, ctx: Ctx) -> None:
+    _revenue_by_distributor(scope, ctx)
+    st.divider()
     st.subheader(ctx.t("Customer scorecard") + f" — {ctx.yr_lo}–{ctx.yr_hi}")
 
     live = scope[scope["distributor"] != "(unmapped)"]

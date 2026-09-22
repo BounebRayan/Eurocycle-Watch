@@ -1,13 +1,18 @@
 # GPAO parity
 
-_How the dashboard's **Activity report**, **Landed cost**, **Re-quotation** and
-**Exchange rate** tabs relate to the Eurocycles GPAO: what ties exactly, what
-doesn't and why, and the seventeen places the GPAO's own arithmetic does not
-hold up._
+_How the dashboard's **Activity report**, **Landed cost**, **Re-quotation**,
+**Exchange rate** and **Build from stock** tabs relate to the Eurocycles GPAO:
+what ties exactly, what doesn't and why, and the twenty-two places the GPAO's
+own arithmetic does not hold up._
 
 Ported so far: `frmActiviteComp1` (§1-4), `frmEtatOFValorises` and
 `frmEtatOFValorisesTrans` (§5), `frmAnalyseCoutMatNC` (§6),
-`frmConsultPrixNC` (§7) and `frmExchangeRate` (§8). Still outstanding: §9.
+`frmConsultPrixNC` (§7), `frmExchangeRate` (§8) and `frmStockADate` (§10).
+Still outstanding: §9.
+
+§10 also carries the one piece of this dashboard that is **not** a port —
+`bike_builder`, which proposes buildable bikes from the unmoved stock §10
+reports. It is marked as such there and on the tab itself.
 
 Date of this pass: 2026-09-21.
 GPAO source: `d:\Source code\Eurocycles\Eurocycles.sln` (VB.NET, DevExpress).
@@ -58,7 +63,7 @@ Section 03 is computed by the GPAO but **excluded from its bulk export** — the
 export only walks the sections it merges into the combined grid, and 03 is
 reachable only by selecting it. That is why the spreadsheet jumps 02 → 04.
 
-The port is `gpao_activity.py`; the tab is `views/management/activity.py`.
+The port is `gpao_activity.py`; the tab is `views/management/activity.py`, on the **Commercial** page.
 
 ### Measures, verbatim
 
@@ -127,6 +132,14 @@ both years:
 `tests/test_gpao_activity.py` pins this: it reads the committed spreadsheet and
 asserts each section's TOTAL row to within a cent. A tidy-up that "simplifies" a
 join will fail it.
+
+The tab's **Excel export** carries the same chain one step further: it writes the
+whole report to a single `.xlsx`, a sheet per section, exactly as
+`frmActiviteComp1` does. Checked against the same window, the exported cells are
+the port's own figures to the cent — 01 at 41,894,202.57, 02 at 136,426, 12 at
+28,240,784.97 — so GPAO export, port and our workbook all agree. It differs in
+one respect only: the first sheet records the window, the filters and the
+caveats, including that these are the GPAO's queries with its defects intact.
 
 ### The three that don't tie — and why it isn't the port
 
@@ -449,7 +462,7 @@ painted as a saving when they are a rise.** The proportion is stable across
 years — 3.1 % on 2023, 3.2 % on 2024 — so this is a standing condition of the
 part master, not a one-off.
 
-The tab shows both readings side by side, and the Actions tab's re-pricing rule
+The tab shows both readings side by side, and the Actions page's re-pricing rule
 ranks on the like-for-like one. Ranking on the GPAO's figure would put real cost
 rises below imaginary savings.
 
@@ -585,7 +598,7 @@ _Added in the fourth pass. Tab: **Exchange rate**. Module: `gpao_exchange.py`._
 ### Why this one came next
 
 §6 prices both legs of the re-quotation at today's rate precisely so the
-comparison isolates price movement rather than FX. The Actions tab had no such
+comparison isolates price movement rather than FX. The Actions page had no such
 protection. Its erosion rule reads booked invoices at booked rates and told the
 reader that steady volume "leaves price or cost" — but every sale Eurocycles
 makes is invoiced in EUR or USD (DT invoices are **5 of 2,213** over 2024-26)
@@ -701,7 +714,7 @@ Constant-rate revenue is then zero and the margin undefined, so the split
 returns NaN rather than a number that would rank near the top of any list sorted
 by damage.
 
-### What it changed on the Actions tab
+### What it changed on the Actions page
 
 Book-wide, across the 433 models sold in both 2025 and 2026, the rate moved
 reported margin by **+0.85 pp**, worth **DT 236,150**. On the erosion rule's own
@@ -723,8 +736,9 @@ replacing it.
 
 ## 9. Not yet ported
 
-Four passes have now ported `frmActiviteComp1`, the two valued-order screens,
-`frmAnalyseCoutMatNC`, `frmConsultPrixNC` and `frmExchangeRate`. The GPAO has
+Five passes have now ported `frmActiviteComp1`, the two valued-order screens,
+`frmAnalyseCoutMatNC`, `frmConsultPrixNC`, `frmExchangeRate` and
+`frmStockADate`. The GPAO has
 substantially more management reporting that the dashboard does not yet carry.
 The largest remaining blocks, in rough order of likely value:
 
@@ -734,7 +748,8 @@ The largest remaining blocks, in rough order of likely value:
 | `frmTabCompAnnuel` / `…Grp` | Multi-year comparative tables, by group |
 | `frmAnalyseStock` / `frmStockTheorique` | Stock analysis, theoretical stock by group |
 | `frmStatistiques` | The GPAO's own statistics screen |
-| `09-Managements reports/02-Stock` (~30 screens) | Needs planning, safety stock, inventory variance |
+| `09-Managements reports/02-Stock` (~29 remaining) | Needs planning, safety stock, inventory variance — `frmStockADate` is done (§10) |
+| `ECMagasin` (not a GPAO screen) | The WMS proper: per-storehouse, per-location stock across 15 depots — see §10 |
 | `09-Managements reports/05-Etat des nomenclatures` | BOM states — ordered, invoiced, produced, valued |
 
 `frmActiviteComp` and `frmAnalyseComparative2` are **older variants of the same
@@ -755,3 +770,278 @@ price list per model (`prxnom` / `tarif_det`)". That was wrong on both counts.
 customer's list — and `tarif_det` is not read by the screen at all. The pricing
 engine is `costing_nc`, and as §7 sets out it stores no price, only the inputs
 to one.
+
+---
+
+## 10. Unmoved stock — `frmStockADate`
+
+_Added in the fifth pass. Tab: **Build from stock**. Modules: `gpao_stock.py`
+(the port) and `bike_builder.py` (**not** a port — see below)._
+
+### Why this one came next
+
+§9 listed the thirty-odd screens of `09-Managements reports/02-Stock` as the
+largest unported block. This is the one with a business question attached:
+**DT 6.3M of parts have not been issued or reserved since the start of 2024**,
+and 90 % of that value is a part a live bike BOM still calls for. It is not
+scrap — it is bikes that were never assembled, sitting at full cost.
+
+### What the screen does
+
+`frmStockADate` is a radio group over one query. Four of its seven readings are
+balance filters; three are movement readings, and those are what is ported:
+
+```
+balance(asof) = Σ (detarticle.qtep − detarticle.qtem)   dat <= asof
+                                                        HAVING qte <> 0
+
+option 4  "Stock non mouvementé"     balance ≠ 0
+                                     AND Σ qtem over (detart ∪ detarticle)
+                                         in [since, asof] = 0
+option 5  "Stock jamais mouvementé"  option 4
+                                     AND NOT EXISTS lib LIKE 'Achat Facture%'
+                                         in (detart ∪ detarticle), dat >= since
+option 6  option 4, with `lib NOT LIKE 'Cmde Frns%'` removed from the balance
+```
+
+**Option 5 is the ERP's own caption for "jamais mouvementé", and its own
+definition of it.** Both it and option 4 are *window* rules: a part is never
+moved relative to a date you choose, not over all time. The tab defaults to
+option 5 and exposes the other two.
+
+Valuation follows `rbPrice.SelectedIndex = 1`: the latest `detart.pmp` at or
+before the as-of date, ordered `dat DESC, indice DESC, lib DESC`, falling back
+to `prxfobfpiec × cours`.
+
+### Parity
+
+No export for this screen either, so parity is pinned as §5-§8 were: **the
+GPAO's own SQL, run character for character**. `_gpao_sql` holds the query the
+VB builds; `tests/test_gpao_stock.py::test_port_reproduces_the_gpao_query` runs
+it for all three modes and asserts the port matches on row count, units and
+dinar.
+
+| As at 2026-09-21, unmoved since 2024-01-01 | parts | units | value |
+|---|---:|---:|---:|
+| option 4 — not moved | 3,595 | 2,741,317 | DT 6,756,871 |
+| **option 5 — never moved** | **3,355** | **2,617,645** | **DT 6,273,660** |
+| option 6 — not moved, ex. undelivered | 3,569 | 2,728,509 | DT 6,628,963 |
+| of option 5, used by a live bike BOM | 2,858 | — | **DT 6,093,890** |
+
+Option 5 is a strict subset of option 4, which a test asserts — the extra
+`NOT EXISTS` can only remove rows, and if it ever added one it would have been
+wired the wrong way round, silently.
+
+### Five more defects
+
+**18. Before the ledger's rebase the screen reports nothing, and presents it as
+an answer.** The balance is summed over `detarticle` alone, which in this
+restore begins at its `STOCK DEPART` rebase on **2026-07-01**. An as-of date one
+day earlier matches no rows, so the grid comes back empty — not "I cannot see
+that far back", but a clean and confident nothing. Measured: 19,613 parts are
+visible at 2026-07-01 and **zero** at 2026-06-30. The older history is in
+`detart`, which the balance never reads. This is the one place the tab does not
+reproduce the screen: `gpao_stock.ledger_start()` reads the rebase date and the
+tab refuses an earlier as-of rather than showing the empty grid.
+
+**19. The balance is not physical stock — it nets off orders that have not
+happened yet.** `SUM(qtep - qtem)` runs over every ledger page, so customer-order
+reservations (`Cmde Client`, 3.97M units) and production reservations
+(`Of En Cours`, 2.20M) are subtracted, while supplier orders not yet delivered
+(`Cmde Frns`, 1.77M) are added. The screen offers a switch for the supplier side
+only. What it calls stock is an availability figure — **26.69M units against
+28.89M of purely physical movement**.
+
+> **This one works in our favour, and it is why the builder can trust the pool.**
+> Because reservations are booked as `qtem`, a part that is spoken for fails the
+> movement test and never reaches the unmoved list. "Unmoved" therefore means
+> *neither consumed nor reserved*, so the pool is genuinely free to allocate
+> rather than quietly competing with the order book.
+> `test_reservations_keep_a_spoken_for_part_out_of_the_pool` pins it.
+
+**20. Option 5's re-purchase test has no upper date bound.** Every other clause
+is bracketed by the as-of date; the `NOT EXISTS ... LIKE 'Achat Facture%'` check
+carries only `dat >= since`. A receipt dated after the as-of date would
+disqualify a part from a historical run. `detarticle` does hold 84,721
+forward-dated rows out to 2027-12-06, but none is a receipt, so this is **latent
+on this restore rather than measured** — recorded the way §8's `ELSE 0` was.
+
+**21. A part with no costed movement is valued at its FOB price, with nothing to
+say so.** `CASE WHEN PMP <> 0 THEN PMP ELSE prxfobfpiec * cours END` collapses
+two different things into one column — what was paid, and what was quoted. On
+the option 5 population that is 37 of 3,355 parts. `load_unmoved` returns
+`value_basis` so a reader can tell them apart.
+
+**22. The FOB fallback is converted at the as-of rate, not the rate it was quoted
+at.** `prxfobfpiec` was set when the part was sourced, sometimes years earlier,
+but the query multiplies it by the latest `devisesc` rate at the as-of date. For
+the 15,478 live parts priced in USD, EUR or YEN, that turns a currency move into
+an apparent change in the value of stock that has not moved at all.
+
+One thing that looks like a defect and isn't: the inner joins to `fournisseur`
+and `groupes` look like they could silently drop parts. They do not — all 19,628
+live parts survive both, checked by query before the claim was written.
+
+---
+
+### `bike_builder.py` — **not a port**
+
+Everything above reproduces a GPAO screen. What sits on top of it does not, and
+the tab says so on its face. There is no ERP screen that proposes a bike, so
+there is no number to tie to and none is claimed.
+
+**The finding that shaped the design.** Coverage of every live bike BOM by
+unmoved stock was measured first: **no model exceeds 49 %**, 5,216 score zero,
+and the best bucket is 25-49 % with 217 models. So "find a model you can already
+build" returns nothing. The pile is skewed to the expensive structural parts —
+frames DT 1.50M, suspension forks DT 0.99M, rear hubs DT 0.47M — because those
+are what gets over-ordered and stranded, while the cheap consumable tail (paint,
+decals, cartons, labels, lubricant, ties, screws) is never unmoved because it
+never stops moving.
+
+**So every build needs a bought tail, and that is fine.** Minimal outside parts
+has to be measured **by value and by lead time, never by line count** — and lead
+time is the real constraint, not money.
+
+### The tab leads with new bikes, not substitution
+
+A substitution into a model the factory already builds swaps one part for
+another in a bike that was going to be built anyway: it moves cost, it does not
+make a sale, and the GPAO's own production planner already substitutes on
+`fpieceq`. So the primary view specifies a **new** bike — one that does not
+exist yet — slot by slot out of the shelf, and the substitution view sits below
+it as the smaller prize.
+
+**How many slots a bike needs is read off the corpus, not chosen.** A 700C bike
+here fills a median of **55 distinct slots** across 70 BOM lines, with quartiles
+at 52 and 57, of which **26 are required** (on ≥ 95 % of live bikes). So a build
+filling fifty-odd slots is a normal bike rather than an inflated one — a point
+the tab makes on the page, because "32 filled, 23 bought" invites the reasonable
+suspicion that something has gone wrong. Nothing has: the 23 bought slots are
+the consumable tail, and at a batch of 100 they come to **DT 1,033 — about
+DT 10 a bike**. An `include_common` toggle drops the build to the 26 required
+slots for anyone who wants to see the floor.
+
+### Two objectives, because they genuinely disagree
+
+The first cut maximised stock cleared, which means taking the dearest part in
+every slot. That is also what makes a bike expensive, and it produced a 700C mid
+build costing **DT 489 against a DT 400 list price** — a bike nobody could sell.
+Constraining it to the tier's own price envelope fixes that, but clears less.
+Neither is a safe default to impose, so the tab asks:
+
+| 700C, mid tier, batch of 100 | stock cleared | cost/bike | list | margin |
+|---|---:|---:|---:|---:|
+| **Protect the margin** | DT 27,257 | DT 298.76 | DT 400 | **+25.4 %** |
+| **Clear the shelf** | **DT 47,920** | DT 489.53 | DT 400 | **−22.3 %** |
+
+Both are shown whichever is selected, because the choice depends on whether the
+shelf space or the sale is the binding problem, and that is not the tool's call
+to make. `test_the_two_objectives_trade_stock_against_margin` pins that they
+really do trade against each other — clearing can never free *less*, and where
+it frees more it must cost margin.
+
+Under "protect the margin" the budget is `benchmark_price × (1 − 25 %)`, the
+same `margeProduitFini` target the Overview page, Models tab and Actions page draw their
+reference lines at, with the slots after the current one reserved at what the
+corpus typically pays for them. Where nothing on the shelf fits the remaining
+budget, a shelf part is taken **only if it undercuts buying the slot new** —
+otherwise clearing stock would cost more than the part is worth.
+
+The benchmark is the median `costing_nc` list price for live models at that
+wheel size and tier, which §7 measured at 7.1 % median error against realised
+selling price. A negative margin is a real answer, not a bug: 29-inch high-end
+comes out at **−32.8 %** because the shelf holds no battery, motor or
+controller, so the tail stops being a rounding error. The tab says so rather
+than hiding the build.
+
+### Slots are shown with their names
+
+`typepieces` carries `Libtpiec` (what the slot is), `Ordretpiec` (a hierarchical
+assembly rank) and `Grptpiec` (which of the fifteen `groupes` it belongs to).
+Every slot table on the tab is labelled from it and sorted into the factory's own
+build order — frame, wheels, drive, gears, steering, seating, brakes, then the
+finishing groups. A bare `FFS` means nothing to the person deciding what to
+build, and descriptions stay in French because that is how the ERP holds them.
+
+**The rules are mined, not written.** Each is a count over the 11,934 live bike
+BOMs (763,692 lines):
+
+| Rule | How it is derived |
+|---|---|
+| Required slot | on ≥ 95 % of live bikes — 24 slots overall, 26 at 700C |
+| Common slot | on 40-95 % |
+| Fits a wheel size | the part has been built at that wheel size |
+| Interchangeable | `fpieceq`, or paired with the same frame in a real BOM |
+
+A slot legitimately repeats within a model — `SKN` twice at 36 spokes, `STK` up
+to nine times, 15 slot types in all — so the engine works **line by line**, never
+one part per slot. Wheel size is applied per slot from evidence rather than as a
+blanket rule: 1,351 of 1,424 frame parts appear at exactly one wheel size, while
+saddles and bars cross freely, and both fall out of the same query.
+
+**Substitutions are tiered so a proposal can be audited.** Over the top 40
+proposals: T0 own part in stock, 510 lines / DT 777k; T1 `fpieceq`-declared, 13
+lines / DT 1.8k; T2 paired with the same frame before, 56 lines / DT 48.6k; T3
+same slot and wheel size, 476 lines / DT 465k. A proposal's headline confidence
+is the **worst** tier among its structural swaps (groups 01-07), not an average —
+one unchecked fork must not hide behind thirty certain decals.
+
+**Tiers are learned, not banded.** Build cost per model at one FX date,
+terciled *within each wheel size* (a 20" child's bike and a 29" MTB are not one
+scale), then described by marker prevalence. The result is worth reading on its
+own: **disc brakes rise 6.8 % → 18.7 % → 37.9 % across the tiers and e-bike
+drive 0.2 % → 0.2 % → 14.4 %, while suspension fork and derailleur barely move.**
+In this factory, brakes and electrification make a bike expensive; suspension and
+gearing do not.
+
+### Two things that would have been wrong, and are not
+
+**Contention**, in the substitution view. Proposals compete for the same frames. On the current pool the
+60-deep shortlist wants **DT 2,225,810** standing alone and can actually clear
+**DT 956,054** — summing the proposals would have overstated the prize by 2.3×.
+`allocate()` hands the pool out in rank order and reports both, and
+`test_allocation_removes_the_double_counting` is the test this suite exists for.
+The allocation is greedy, which is not optimal and is not claimed to be; the
+figure is a floor.
+
+**The bought tail has to be scaled too.** A proposal that wins a tenth of the
+stock it wanted builds a tenth of the batch and buys a tenth of its tail. The
+first cut of the portfolio tile summed the *unscaled* buy cost — pricing every
+proposal at full volume, six thousand bikes for a sixty-deep list — and reported
+DT 9.4M of cash against DT 956k cleared, a ratio of 0.1× for a programme whose
+best proposal returns 24×. Scaling by the allocated share gives DT 952k and a
+portfolio ratio of 1.0×, with 41 proposals clearing more than they cost. The
+ratio degrades sharply down the ranking, which is the argument for running the
+top few rather than the table.
+
+### What it changed on the Actions page
+
+`_rule_dead_stock` sizes the prize at **DT 622,540** — stock cleared after
+allocation, less the scaled bought tail, over the 22 models that clear more than
+they cost at a batch of 100. It is deliberately the post-allocation figure: the
+standalone total would put this rule above every other rule on the list while
+being roughly twice the money that exists.
+
+Since the Management view split into pages, this rule also feeds the **Overview**
+page's attention list, so it runs on the landing page. That made its cost worth
+fixing: `rank_retrofits` and `allocate` were uncached, and `rank_retrofits` runs
+`propose_retrofit` over the shortlist — several full passes over a ~12,000-model
+corpus each — on *every* rerun, so changing the display currency paid for it
+again. `bike_builder.dead_stock_portfolio()` wraps both behind an
+`st.cache_data` keyed on the window scalars. The Actions page and the Overview's
+attention list ask for the same window and so share one entry; the
+Build-from-stock tab keys on its own controls (shortlist, batch, movement rule,
+tier, wheel) and pays once per combination. Cold, the rule costs ~48s and every
+other rule on the list together costs ~2s.
+
+### Not done, and worth knowing
+
+`ECMagasin` is a full WMS that nothing in the dashboard reads — `StockMovement`
+(565k rows, 2024-01 → 2026-08-19, per storehouse and per location, with
+`UnitCostPmp` / `RealStock` / `VirtualStock`), `Location` (26,244 rows down to
+aisle and level) and 15 named depots. It would answer "where physically is this
+dead stock", which is the next question anyone acting on this tab will ask, and
+it answers "never moved" and "last movement date" far more cleanly than the
+`detart` / `detarticle` union does. It is a separate unported source and folding
+it in here would have doubled the work, so it is the natural next pass.

@@ -7,12 +7,14 @@ Two views, one app (`streamlit run dashboard.py`):
   (new/delisted models), and — best-effort — stock status and ratings. Reads the
   committed SQLite snapshot; works anywhere.
 - **Management** — the internal cost / margin / production picture from the
-  Eurocycles ERP (SQL Server), in twelve tabs: **Overview** (company scoreboard),
-  **Models** (best/worst, cost vs sale price per bike, margin drift), **Customers**
-  (per-distributor scorecard + shipment plan vs actual), **Production** (plan
-  attainment, label throughput, line-flow time), **Supply & cost** (component
-  price inflation, supplier spend, quality claims, PO pipeline), **Finance**
-  (billings vs collections, commission cost). **Local-only** — the ERP is on
+  Eurocycles ERP (SQL Server), across six pages. **Overview** is the one meant to
+  be read in full: the company scoreboard, the walk down to net profit, why the
+  margin moved, and the few things most worth acting on. The rest are the
+  evidence — **Actions** (the full rule-driven to-do list), **Commercial**
+  (Models · Customers · Value chain · Activity report), **Operations**
+  (Production · Build from stock · Supply & cost), **Costing** (Landed cost ·
+  Re-quotation · Exchange rate) and **Finance** (P&L · Billings vs collections ·
+  Payroll · Commission). **Local-only** — the ERP is on
   the office machine's own SQL Server instance (`EC-RAYAN`) and isn't reachable
   from Streamlit Cloud, so the view shows an explainer there. See
   [`docs/eurocycles-erp-findings.md`](docs/eurocycles-erp-findings.md) (§12b for
@@ -34,14 +36,100 @@ apollo-dashboard/
   views/
     distributor.py       # the Apollo / Halfords watch (SQLite)
     management/          # the ERP-backed management view (package, one module per tab)
-      __init__.py        #   render(): connection guard, sidebar, 12 tabs
+      __init__.py        #   re-exports _nav only, so dashboard.py imports no page
+      _nav.py            #   the six st.Page objects; the only map of key -> page
+      _shell.py          #   begin(): connection guard, shared sidebar, scope + Ctx
       _common.py         #   Ctx + shared money/format helpers
+      page_overview.py   #   the global view
+      page_actions.py  page_commercial.py  page_operations.py
+      page_costing.py  page_finance.py     #   thin: a tab row over the modules below
       actions.py         #   the to-do list: rules over the other tabs' data
-      overview.py  models.py  valuechain.py  customers.py
+      bridge.py          #   the margin bridge: waterfall on Overview, drill on Models
+      models.py  valuechain.py  customers.py
       production.py  supply.py  finance.py
-      activity.py  landed.py  requote.py  exchange.py
+      activity.py  landed.py  requote.py  exchange.py  builder.py
   data/apollo_dashboard.db   # created on first run
 ```
+
+### Why six pages, and the one Streamlit rule that makes it work
+
+The Management view was one page of thirteen tabs. The tab row stopped fitting on
+a screen, every tab opened on its own KPI strip, and there was no answer to "what
+do I look at first" — so it split into an **Overview** meant to be read in full
+and four themed detail pages behind it.
+
+Two mechanics carry the split, and both are easy to break by accident:
+
+**Sidebar filters need `persist_state="session"`.** A widget's element id always
+folds in the active script hash (`streamlit/elements/lib/utils.py`), *even when
+it has a `key`* — so the same key on two pages is two different widgets. Without
+`persist_state`, currency / language / bikes-only / years / distributor all reset
+to their defaults on every navigation inside Management. Add a sidebar control to
+`_shell.begin()` and it needs the same treatment. Do not mirror values into
+`st.session_state` by hand: assigning a widget's key yourself is what triggers
+Streamlit's duplicate-value warning, while passing `value=`/`default=`/`index=`
+alongside `key=` never does.
+
+**Tabs are lazy.** Plain `st.tabs` runs *every* tab body on *every* rerun — with
+thirteen tabs that meant changing the currency re-ran the landed-cost,
+re-quotation and dead-stock engines to draw results nobody was looking at.
+`_shell.tabbed()` passes `on_change="rerun"` and gates each body on the
+container's `.open`, so a page costs what the tab you are on costs. It also
+reads `?tab=`, which is how an Actions finding links straight to its evidence.
+
+Both need Streamlit ≥ 1.63, which is why `requirements.txt` pins it.
+
+**What the Overview costs.** It runs all eight Actions rules so its "at stake"
+total is the same number the Actions page shows — a landing page that quietly
+omitted the biggest item on the list would be worse than a slow one. Seven of
+the rules cost about 2s between them; `_rule_dead_stock` costs ~48s cold,
+because it runs the retrofit engine. That section is therefore **last on the
+page and wrapped in a spinner**: Streamlit streams elements as the script runs,
+so the scoreboard, the charts and the margin bridge are on screen within a few
+seconds while the attention list fills in behind them. Every rerun after that is
+under a second. Keep that ordering if you add sections.
+
+### Year-on-year figures cut on the day, not the month
+
+Every YoY delta on the site runs through `_common.like_for_like`, which trims the
+partial newest year *and its comparison year* to the same elapsed period. It used
+to trim to whole **months**, which is not enough: the newest month is itself a
+part month. On data ending 19 Aug 2026 that put 19 days of August 2026 against
+all 31 days of August 2025 — DT 2.0M of prior-year revenue with no counterpart —
+and overstated the revenue decline by 1.6 points (−43.0 % shown against −41.3 %
+true), while the caption underneath promised that "a part year isn't measured
+against a full one".
+
+It now cuts on the data's own day in both years. `views/management/bridge.py`
+carries the same cut for the margin bridge, because the reader can pick any pair
+of years there. `tests/test_comparisons.py` pins both, and fails if the
+month-level cut comes back.
+
+### Taking a section away — Excel
+
+`views/management/_export.py` puts an Excel download on the sections someone acts
+on rather than just reads: the **Activity report** (the whole report, a sheet per
+section), **Actions** (an index sheet plus one per rule), the **value chain**'s
+matched models, the full **re-quotation** list, and a **build from stock**
+proposal (stock and buy on separate sheets).
+
+Excel rather than PDF because that is the workflow that already exists: the
+GPAO's own Activity report exports to `.xlsx` and nothing else
+(`frmActiviteComp1.bbiExport_ItemClick` → `ExportToXlsx`), and the spreadsheet
+`tests/test_gpao_activity.py` ties us to is one of those exports. No PDF engine
+is a dependency here, and adding one would serve a habit nobody has.
+
+**Every workbook opens on an About sheet**, which is the point rather than a
+flourish. These figures are hedged — this block is company-wide, that one ignores
+the sidebar, those three sections run short because `detart` ends early, this
+total reproduces a GPAO defect deliberately. A spreadsheet that reaches someone's
+inbox carrying the numbers but none of the hedges is a way of showing something
+wrong, so the caveats travel with the file along with the window, the filters and
+the currency that produced it.
+
+The bytes are cached (`_export._build`): `st.download_button` needs them up
+front, and rebuilding the activity workbook on every rerun cost ~500 ms — most of
+what lazy tabs had just saved.
 
 ### Management view — connecting to the ERP
 
@@ -50,7 +138,9 @@ SQL Server*. Connection string resolution: `st.secrets["erp"]["odbc"]` → env
 `ERP_ODBC` → local default (`SERVER=EC-RAYAN`, `Encrypt=no`) — the machine's own
 `MSSQLSERVER` Windows service, always running, no instance to start by hand.
 
-The **Actions / Overview / Activity report / Models / Value chain / Customers / Landed cost / Re-quotation / Exchange rate** tabs need only `eurocycles_db`. Three tabs use
+**Overview**, **Actions**, **Commercial**, **Costing** and **Finance** need only
+`eurocycles_db`. On **Operations**, **Build from stock** needs `eurocycles_db_calc`
+as well, for the stock ledger. Three tabs use
 satellite databases on the same instance and degrade gracefully if one is absent:
 **Supply & cost** → `eurocycles_db_calc` (component price history), **Production**
 → `eurocycles_label` (serial-label throughput), **Models' detail dialog** →
@@ -100,7 +190,7 @@ It closes most of a gap the earlier pass couldn't explain. Over Jan–Jun 2026:
 
 | | |
 |---|---:|
-| Margin over material (what the Overview shows) | 31.9 % |
+| Margin over material (what the Overview's scoreboard shows) | 31.9 % |
 | less inbound freight | −4.6 pp |
 | **Margin after freight** | **27.3 %** |
 | Accounting gross margin, from the P&L pack | 26.9 % |
@@ -144,7 +234,7 @@ vanishes from the new quotation while keeping its full weight in the old cost �
 turning a gap in the part master into an apparent saving. Over 2026 that is 3.0 %
 of components, and it is enough to flip the answer on **126 of 749 models**: the
 GPAO reports material cost falling 1.94 %, like for like it fell 0.36 %. The tab
-carries both readings everywhere, and the Actions tab's new re-pricing rule ranks
+carries both readings everywhere, and the Actions page's new re-pricing rule ranks
 on the like-for-like one.
 
 Parity is pinned by running the GPAO's own query string character for character
@@ -160,7 +250,7 @@ model sold at an unchanged foreign price to the same customer in the same volume
 still loses dinar margin. The **Exchange rate** tab ports `frmExchangeRate` and,
 more usefully, sizes that effect.
 
-It mattered because the Actions tab's margin-erosion rule didn't know about it.
+It mattered because the Actions page's margin-erosion rule didn't know about it.
 The rule told the reader that steady volume "leaves price or cost"; on 2025→2026
 a third of the money it was sizing was neither. Holding the rate constant across
 both years:
@@ -181,9 +271,99 @@ sum to the total printed next to them. On 2026 they're 4× apart on USD and
 opposite in sign on EUR. Both readings are shown rather than reconciled. See
 `docs/gpao-parity.md` §8.
 
+### Build from stock — bikes out of parts that never moved
+
+**DT 6.3M of parts have not been issued or reserved since the start of 2024**,
+and 90 % of that value is a part a live bike still calls for. It isn't scrap —
+it's bikes that were never assembled, sitting on the balance sheet at full cost.
+
+The **Build from stock** tab ports `frmStockADate` for the stock reading (its
+radio group has an option captioned, in the ERP's own words, *Stock jamais
+mouvementé*) and then does something the GPAO has no screen for: works out what
+could be built out of it.
+
+The first thing measured was whether any existing model could simply be re-run.
+**None can** — no live BOM is more than 49 % coverable from unmoved stock, and
+5,216 of 11,934 score zero. The pile is the expensive structural parts (frames
+DT 1.50M, suspension forks DT 0.99M, rear hubs DT 0.47M), because those are what
+gets over-ordered and stranded; the cheap consumable tail never shows up because
+it never stops moving.
+
+**So the tab leads with new bikes rather than substitution.** Swapping a part
+into a model you already build moves cost without making a sale, and the GPAO's
+production planner already substitutes on `fpieceq`. The primary view specifies a
+bike that doesn't exist yet, slot by slot out of the shelf.
+
+**How many slots that takes is read off the corpus, not chosen.** A 700C bike
+here fills a median of **55 slots** across 70 BOM lines (quartiles 52 and 57), of
+which **26 are required** — on 95 % or more of live bikes. So a build filling
+fifty-odd slots is a normal bike, not an inflated one. At a batch of 100 the
+slots it has to buy come to **DT 1,033, about DT 10 a bike**: the consumable tail
+of chain, cables, ties, labels and screws, cheap precisely because those are the
+parts that never stop moving and so never sit in dead stock. A toggle drops the
+build to the 26 required slots for anyone who wants to see the floor.
+
+**Minimal outside parts has to be measured by value and lead time, never by line
+count** — 23 bought lines worth DT 1,033 beats three worth DT 200, and the 90-day
+lead is the real constraint.
+
+**Two objectives, because they genuinely disagree.** Maximising stock cleared
+means taking the dearest part in every slot — which is also what makes a bike
+expensive. Left alone it produced a 700C build costing DT 489 against a DT 400
+list price, a bike nobody could sell:
+
+| 700C, mid tier, batch of 100 | stock cleared | cost/bike | list | margin |
+|---|---:|---:|---:|---:|
+| **Protect the margin** | DT 27,257 | DT 298.76 | DT 400 | **+25.4 %** |
+| **Clear the shelf** | **DT 47,920** | DT 489.53 | DT 400 | **−22.3 %** |
+
+Both are shown whichever you pick, because whether shelf space or the sale is the
+binding problem isn't the tool's call. A negative margin is a real answer too:
+29-inch high-end comes out at −32.8 % because the shelf holds no battery, motor
+or controller.
+
+Every slot is shown with its name and assembly group from `typepieces`, sorted
+into the factory's own build order — frame, wheels, drive, gears, steering,
+seating, brakes, then finishing. A bare `FFS` means nothing to whoever is
+deciding what to build.
+
+**The compatibility rules are mined from the BOM corpus, not written by hand.**
+Every rule is a count over the 11,934 live bike bills of materials the factory
+has already built and shipped: a slot is required if ≥ 95 % of bikes have one
+(24 slots, 26 at 700C), a part fits a wheel size if it has been built at that
+wheel size, and two parts are interchangeable if `fpieceq` says so or a real BOM
+paired them with the same frame. Each substitution carries the tier that
+licensed it, so a proposal is auditable line by line, and a proposal's headline
+confidence is the **worst** structural swap rather than an average.
+
+Economy / mid / high-end are terciles of build cost taken *within* each wheel
+size, then described by what actually separates them. That description is worth
+reading on its own: across the tiers **disc brakes go 6.8 % → 18.7 % → 37.9 %
+and e-bike drive 0.2 % → 0.2 % → 14.4 %, while suspension fork and derailleur
+barely move.** In this factory brakes and electrification make a bike expensive;
+suspension and gearing don't.
+
+Two things the substitution view is careful about, because both would have been
+wrong:
+
+- **Proposals compete for the same frames.** The 60-deep shortlist wants
+  DT 2,225,810 standing alone and can actually clear **DT 956,054** — summing
+  them would overstate the prize by 2.3×. Both figures are shown, and the
+  headline uses the second.
+- **The bought tail scales with what a proposal actually wins.** A proposal that
+  gets a tenth of the parts builds a tenth of the batch and buys a tenth of the
+  tail. Summing unscaled buy cost prices every proposal at full volume — six
+  thousand bikes for a sixty-deep list — and made the portfolio read 0.1× when
+  its best proposal returns 24×.
+
+The Actions page sizes the whole thing at **DT 622,540** across the 22 models that
+clear more stock than they cost to finish. Full detail, the five defects in
+`frmStockADate` that shape what can be trusted, and what `ECMagasin` would add
+next: `docs/gpao-parity.md` §10.
+
 ### Profitability — the finance pack
 
-The Overview's second block walks **revenue down to net profit**: gross margin,
+The Finance page's **P&L** tab walks **revenue down to net profit**: gross margin,
 each operating-cost section, pre-tax profit, tax, net. It comes from
 [`finance_pack.py`](finance_pack.py) reading the accounting export in
 `data/finance/pl-<year>.xlsx`, **not** from the ERP — which holds none of those
@@ -203,12 +383,12 @@ Two things worth knowing before reading the numbers:
 - **The KPI strip's margin is a different measure** — `revenue − facture_det.mat`,
   which is material cost only and runs ~5 points above the accounting gross
   margin. The tile is labelled "Margin over build cost" for that reason, and an
-  expander on the Overview reconciles the two. See docs §12d.
+  expander on the Finance page's P&L tab reconciles the two. See docs §12d.
 
 ### Language
 
 A **Language** selector sits under **Currency** in the sidebar (English /
-Français). It translates the whole Management view — controls, tab names,
+Français). It translates the whole Management view — controls, page and tab names,
 headings, KPI labels, captions, `help=` tooltips, chart axes and legends, table
 headers and dropdown options. What stays as-is is ERP data: model names, brands,
 countries and column identifiers like `nomachat.cusnach`.
@@ -244,7 +424,8 @@ matters), and production plan-vs-declared for the exact code.
 
 ### Margin bridge — why the margin line moved
 
-At the bottom of the **Overview** tab. Decomposes the year-on-year change in gross
+The waterfall is on the **Overview** page; the per-model drill that names what moved
+it is on **Commercial › Models**. Decomposes the year-on-year change in gross
 margin into six buckets, as an **exact identity** — they sum to the change to the
 cent, which is what makes it auditable rather than a story:
 
@@ -274,7 +455,7 @@ Two things it gets right that are easy to get wrong:
 
 ### Actions — the to-do list
 
-`views/management/actions.py` is the landing tab. Every other tab answers "what
+`views/management/actions.py` backs the **Actions** page, and its top five findings lead the Overview. Every other tab answers "what
 happened"; this one answers "what should someone do on Monday". It runs a fixed
 set of rules over the same data the other tabs chart, keeps only rows breaking a
 threshold, **sizes each in money on a stated basis**, and ranks them. Every block

@@ -25,6 +25,7 @@ import streamlit as st
 import gpao_activity as G
 from i18n import N_
 from theme import style_fig, hbar_categories
+from . import _export
 from ._common import Ctx, TILE_H, sym, to_disp, compact
 
 # The GPAO's own grouping of the nineteen sections into its tree menu.
@@ -65,15 +66,27 @@ def render(ctx: Ctx) -> None:
     _headline(d1, d2, ctx)
     _caveats(ctx)
 
+    # Reserved now, filled at the bottom. The button belongs at the top where the
+    # GPAO puts its own export, but it can only be built once every section has
+    # run — and it exports exactly what rendered, so a workbook never contains a
+    # section the reader didn't see.
+    export_slot = st.container()
+
     st.divider()
+    drawn: dict[str, pd.DataFrame] = {}
     for group, codes in GROUPS:
         st.markdown(f"#### {ctx.t(group)}")
         if group == "Component consumption":
-            _consumption(codes, d1, d2, ctx)
+            drawn.update(_consumption(codes, d1, d2, ctx))
             continue
         for code in codes:
-            _section(code, d1, d2, ctx)
+            df = _section(code, d1, d2, ctx)
+            if df is not None:
+                drawn[code] = df
         st.write("")
+
+    with export_slot:
+        _download_report(drawn, d1, d2, ctx)
 
 
 # ------------------------------------------------------------ the window ---
@@ -174,7 +187,8 @@ def _caveats(ctx: Ctx) -> None:
 
 
 # --------------------------------------------------------------- sections ---
-def _section(code: str, d1: dt.date, d2: dt.date, ctx: Ctx) -> None:
+def _section(code: str, d1: dt.date, d2: dt.date, ctx: Ctx) -> "pd.DataFrame | None":
+    """Draw one section. Returns the frame it drew, for the export to reuse."""
     sec = G.BY_CODE[code]
     label = f"{sec.code} — {ctx.t(sec.english)}"
     with st.expander(label):
@@ -187,12 +201,13 @@ def _section(code: str, d1: dt.date, d2: dt.date, ctx: Ctx) -> None:
             df = G.load_section(code, d1, d2)
         except Exception as exc:
             st.warning(ctx.tf("Could not read this section: {err}", err=str(exc)[:200]))
-            return
+            return None
         if df.empty:
             st.info(ctx.t("No rows in this window."))
-            return
+            return None
         _table(df, sec, ctx)
         _chart(df, sec, ctx)
+        return df
 
 
 def _table(df: pd.DataFrame, sec: G.Section, ctx: Ctx) -> None:
@@ -252,7 +267,8 @@ def _chart(df: pd.DataFrame, sec: G.Section, ctx: Ctx) -> None:
 
 
 # ----------------------------------------------------------- consumption ---
-def _consumption(codes: list[str], d1: dt.date, d2: dt.date, ctx: Ctx) -> None:
+def _consumption(codes: list[str], d1: dt.date, d2: dt.date,
+                 ctx: Ctx) -> "dict[str, pd.DataFrame]":
     """Sections 15-17 walk every production declaration back to its BOM line and
     price it at the FX rate of the order's date. The GPAO does that with a
     correlated subquery over a 4.2M-row movement ledger, and it takes minutes —
@@ -277,7 +293,77 @@ def _consumption(codes: list[str], d1: dt.date, d2: dt.date, ctx: Ctx) -> None:
             db="eurocycles_db_calc", end=f"{covered:%d %b %Y}", to=f"{d2:%d %b %Y}"))
 
     if not st.button(ctx.t("Run the consumption sections"), key="act_conso"):
-        return
+        return {}
+    out: dict[str, pd.DataFrame] = {}
     with st.spinner(ctx.t("Walking the production declarations…")):
         for code in codes:
-            _section(code, d1, d2, ctx)
+            df = _section(code, d1, d2, ctx)
+            if df is not None:
+                out[code] = df
+    return out
+
+
+# --------------------------------------------------------------- export ---
+def _export_frame(df: pd.DataFrame, sec: G.Section, ctx: Ctx) -> pd.DataFrame:
+    """One section as it reads on screen: money in the display currency, the
+    internal `kind` column dropped, headers in words rather than `v1`/`v2`."""
+    out = df.copy()
+    if sec.unit == "money":
+        for c in ("v1", "v2", "delta"):
+            out[c] = to_disp(out[c], ctx)
+    out = out.drop(columns=[c for c in ("kind",) if c in out.columns])
+    unit = f" ({ctx.ccy})" if sec.unit == "money" else ""
+    return out.rename(columns={
+        "label": ctx.t("Designation"),
+        "v1": ctx.t("Current") + unit,
+        "pct1": "%",
+        "v2": ctx.t("Prior year") + unit,
+        "pct2": "% ",
+        "delta": ctx.t("Variance") + unit,
+        "delta_pct": ctx.t("Variance %"),
+    })
+
+
+def _download_report(drawn: dict[str, pd.DataFrame], d1: dt.date, d2: dt.date,
+                     ctx: Ctx) -> None:
+    """The whole report as one workbook, a sheet per section.
+
+    The GPAO exports this screen to a single `.xlsx` and that is the file people
+    already pass around, so this matches it. What it adds is the About sheet:
+    every caveat the page carries — company-wide, the GPAO's own arithmetic
+    defects, the short costing ledger — travels with the numbers."""
+    if not drawn:
+        return
+    p1, p2 = G._prior(d1), G._prior(d2)
+    sheets = {f"{code} {G.BY_CODE[code].english}"[:31]: _export_frame(df, G.BY_CODE[code], ctx)
+              for code, df in sorted(drawn.items())}
+
+    notes = [
+        ctx.t("Company-wide. The sidebar's Distributor, Bikes only and Years filters "
+              "do not apply to this report — it takes a date window and nothing else."),
+        ctx.t("These are the GPAO's own queries, including its known arithmetic "
+              "defects, so the figures tie to the GPAO rather than being corrected. "
+              "Sections 01, 04 and 06 each total revenue differently; average price "
+              "divides two different populations. See the Activity report tab for "
+              "the full explanation."),
+    ]
+    covered = G.consumption_coverage()
+    if covered is not None and covered.date() < d2 and any(c in drawn for c in ("15", "16", "17")):
+        notes.append(ctx.tf(
+            "Sections 15-17 under-report: the costing database stops at {end}, "
+            "while this window runs to {to}.",
+            end=f"{covered:%d %b %Y}", to=f"{d2:%d %b %Y}"))
+    missing = [c for c in ("15", "16", "17") if c not in drawn]
+    if missing:
+        notes.append(ctx.tf("Sections {codes} are not in this workbook — they were not "
+                            "run. Use the button on the tab, then export again.",
+                            codes=", ".join(missing)))
+
+    _export.download(
+        ctx.tf("Download the activity report — {n} sections", n=len(sheets)),
+        sheets, f"activity-report_{d1:%Y%m%d}-{d2:%Y%m%d}.xlsx",
+        ctx=ctx, title=ctx.t("Activity report") + " — " + ctx.t("GPAO parity"),
+        key="act_xlsx",
+        meta=[(ctx.t("Window"), f"{d1:%d %b %Y} → {d2:%d %b %Y}"),
+              (ctx.t("Compared against"), f"{p1:%d %b %Y} → {p2:%d %b %Y}")],
+        notes=notes)

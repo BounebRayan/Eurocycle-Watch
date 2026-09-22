@@ -21,6 +21,7 @@ import streamlit as st
 import crosswalk
 import erp
 from theme import FONT, style_fig, hbar_categories
+from . import _export
 from ._common import Ctx, TILE_H
 
 # The scraped shelf we can join to. `crosswalk.DISTRIBUTOR_CUSTOMER` maps it to
@@ -326,6 +327,18 @@ def _table(e: pd.DataFrame, ctx: Ctx) -> None:
             "confidence": ctx.t("Match"),
         },
     )
+    _export.download(
+        ctx.t("Download the matched models"),
+        {ctx.t("Matched models"): e},
+        "value-chain.xlsx", ctx=ctx, title=ctx.t("Where the retail price goes"),
+        key="vc_xlsx", meta=_export.scope_meta(ctx),
+        notes=[ctx.t("Every money column on this sheet is in pounds, not the "
+                     "sidebar's currency: it is a shelf-price comparison and the "
+                     "shelf prices are in pounds."),
+               ctx.t("Models are matched to the shelf by name, e-bike flag and wheel "
+                     "size, not by a shared code — the Match column is that join's "
+                     "own confidence. Rows neither side could match are on the tab, "
+                     "not in this file.")])
 
 
 # --------------------------------------------------------- the two leftovers ---
