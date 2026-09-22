@@ -290,22 +290,21 @@ gets over-ordered and stranded; the cheap consumable tail never shows up because
 it never stops moving.
 
 **So the tab leads with new bikes rather than substitution.** Swapping a part
-into a model you already build moves cost without making a sale, and the GPAO's
-production planner already substitutes on `fpieceq`. The primary view specifies a
-bike that doesn't exist yet, slot by slot out of the shelf.
+into a model you already build moves cost without making a sale. The primary view
+specifies a bike that doesn't exist yet, slot by slot out of the shelf.
 
 **How many slots that takes is read off the corpus, not chosen.** A 700C bike
 here fills a median of **55 slots** across 70 BOM lines (quartiles 52 and 57), of
 which **26 are required** — on 95 % or more of live bikes. So a build filling
 fifty-odd slots is a normal bike, not an inflated one. At a batch of 100 the
-slots it has to buy come to **DT 1,033, about DT 10 a bike**: the consumable tail
+slots it has to buy come to **DT 3,873, about DT 39 a bike**: the consumable tail
 of chain, cables, ties, labels and screws, cheap precisely because those are the
 parts that never stop moving and so never sit in dead stock. A toggle drops the
 build to the 26 required slots for anyone who wants to see the floor.
 
 **Minimal outside parts has to be measured by value and lead time, never by line
-count** — 23 bought lines worth DT 1,033 beats three worth DT 200, and the 90-day
-lead is the real constraint.
+count** — 26 bought lines worth DT 3,873 beats three worth DT 4,000, and the
+90-day lead is the real constraint.
 
 **Two objectives, because they genuinely disagree.** Maximising stock cleared
 means taking the dearest part in every slot — which is also what makes a bike
@@ -314,8 +313,8 @@ list price, a bike nobody could sell:
 
 | 700C, mid tier, batch of 100 | stock cleared | cost/bike | list | margin |
 |---|---:|---:|---:|---:|
-| **Protect the margin** | DT 27,257 | DT 298.76 | DT 400 | **+25.4 %** |
-| **Clear the shelf** | **DT 47,920** | DT 489.53 | DT 400 | **−22.3 %** |
+| **Protect the margin** | DT 24,966 | DT 288.39 | DT 400.33 | **+28.0 %** |
+| **Clear the shelf** | **DT 45,645** | DT 491.39 | DT 400.33 | **−22.7 %** |
 
 Both are shown whichever you pick, because whether shelf space or the sale is the
 binding problem isn't the tool's call. A negative margin is a real answer too:
@@ -343,21 +342,60 @@ and e-bike drive 0.2 % → 0.2 % → 14.4 %, while suspension fork and derailleu
 barely move.** In this factory brakes and electrification make a bike expensive;
 suspension and gearing don't.
 
+**Every substitution names both parts.** The proposal detail used to show the
+slot and a *Substituted* checkbox, which says that something changes and never
+what — so the one instruction the tab exists to produce was the one thing it
+withheld. Each line now carries the part coming off and the part going on, by
+number and description, with both prices and the evidence tier that licensed the
+swap, on a **Parts to change** tab holding only the lines that actually change.
+
+**Cheaper on the shelf — the question the ERP has the data for and never asks.**
+`fpieceq` holds the pairs it calls interchangeable and `frmAvailableItem` will
+even list a part's equivalents beside their price and their stock — but ordered
+by part number, each in its own currency, with no conversion and no difference
+taken, so no screen ever says which of two interchangeable parts is the cheaper
+one. The only screen that acts on `fpieceq` is the production planner, and only
+on a line already in shortage. Asking it directly: of 10,832 declared pairs,
+5,549 have the specified part in a live BOM, 601 have the equivalent sitting
+unmoved, and **258 have the unmoved one cheaper** — **DT 58,114** off the cost of
+building, **DT 362,965** of dead stock consumed doing it, across **6,564 of the
+11,934 live models**. The top ten pairs are 57 % of the money.
+
+**Which part fills a slot is a second objective, and it was hiding.** Where
+several shelf parts fit, the engine took the dearest — which frees the most shelf
+and also makes the bike cost more. Priced, that default was adding **DT 99,804**
+to what the 60-deep shortlist costs to build; taking the cheapest that fits
+instead takes **DT 147,678** out of it, for DT 118,813 less stock cleared. Both
+are now measured and the tab asks which you want.
+
+| 60-deep shortlist, batch of 100 | stock cleared | build cost | swaps | of those cheaper |
+|---|---:|---:|---:|---:|
+| **Clear the most stock** | **DT 943,182** | +DT 99,804 | 1,037 | 303 |
+| **Cut the build cost** | DT 824,369 | **−DT 147,678** | 1,015 | 587 |
+
+None of that arithmetic was possible until a currency defect underneath it was
+fixed: **`prxndach` is stored in the part's own purchase currency**, four fifths
+of this corpus is bought in USD or EUR, and three readings were adding it as
+though it were dinar. The median model's build cost read DT 102.71 against a true
+DT 207.69, the 414 yen lines read fifty-three times what they cost, and **31.7 %
+of models sat in the wrong tier.**
+
 Two things the substitution view is careful about, because both would have been
 wrong:
 
 - **Proposals compete for the same frames.** The 60-deep shortlist wants
-  DT 2,225,810 standing alone and can actually clear **DT 956,054** — summing
-  them would overstate the prize by 2.3×. Both figures are shown, and the
+  DT 2,060,358 standing alone and can actually clear **DT 943,182** — summing
+  them would overstate the prize by 2.2×. Both figures are shown, and the
   headline uses the second.
 - **The bought tail scales with what a proposal actually wins.** A proposal that
   gets a tenth of the parts builds a tenth of the batch and buys a tenth of the
   tail. Summing unscaled buy cost prices every proposal at full volume — six
-  thousand bikes for a sixty-deep list — and made the portfolio read 0.1× when
-  its best proposal returns 24×.
+  thousand bikes for a sixty-deep list — and makes the portfolio read 0.07× when
+  its best proposal returns 40×.
 
-The Actions page sizes the whole thing at **DT 622,540** across the 22 models that
-clear more stock than they cost to finish. Full detail, the five defects in
+The Actions page sizes the whole thing at **DT 507,092** across the 21 models that
+clear more stock than they cost to finish (it read DT 622,540 until the currency
+fix made the bought tail honest). Full detail, the five defects in
 `frmStockADate` that shape what can be trusted, and what `ECMagasin` would add
 next: `docs/gpao-parity.md` §10.
 

@@ -917,10 +917,13 @@ here fills a median of **55 distinct slots** across 70 BOM lines, with quartiles
 at 52 and 57, of which **26 are required** (on ≥ 95 % of live bikes). So a build
 filling fifty-odd slots is a normal bike rather than an inflated one — a point
 the tab makes on the page, because "32 filled, 23 bought" invites the reasonable
-suspicion that something has gone wrong. Nothing has: the 23 bought slots are
-the consumable tail, and at a batch of 100 they come to **DT 1,033 — about
-DT 10 a bike**. An `include_common` toggle drops the build to the 26 required
+suspicion that something has gone wrong. Nothing has: the 26 bought slots are
+the consumable tail, and at a batch of 100 they come to **DT 3,873 — about
+DT 39 a bike**. An `include_common` toggle drops the build to the 26 required
 slots for anyone who wants to see the floor.
+
+(That tail read DT 1,033 until the currency defect below was fixed. It was never
+DT 10 a bike; it was a USD figure printed as dinar.)
 
 ### Two objectives, because they genuinely disagree
 
@@ -932,8 +935,8 @@ Neither is a safe default to impose, so the tab asks:
 
 | 700C, mid tier, batch of 100 | stock cleared | cost/bike | list | margin |
 |---|---:|---:|---:|---:|
-| **Protect the margin** | DT 27,257 | DT 298.76 | DT 400 | **+25.4 %** |
-| **Clear the shelf** | **DT 47,920** | DT 489.53 | DT 400 | **−22.3 %** |
+| **Protect the margin** | DT 24,966 | DT 288.39 | DT 400.33 | **+28.0 %** |
+| **Clear the shelf** | **DT 45,645** | DT 491.39 | DT 400.33 | **−22.7 %** |
 
 Both are shown whichever is selected, because the choice depends on whether the
 shelf space or the sale is the binding problem, and that is not the tool's call
@@ -998,8 +1001,8 @@ gearing do not.
 ### Two things that would have been wrong, and are not
 
 **Contention**, in the substitution view. Proposals compete for the same frames. On the current pool the
-60-deep shortlist wants **DT 2,225,810** standing alone and can actually clear
-**DT 956,054** — summing the proposals would have overstated the prize by 2.3×.
+60-deep shortlist wants **DT 2,060,358** standing alone and can actually clear
+**DT 943,182** — summing the proposals would have overstated the prize by 2.2×.
 `allocate()` hands the pool out in rank order and reports both, and
 `test_allocation_removes_the_double_counting` is the test this suite exists for.
 The allocation is greedy, which is not optimal and is not claimed to be; the
@@ -1008,20 +1011,150 @@ figure is a floor.
 **The bought tail has to be scaled too.** A proposal that wins a tenth of the
 stock it wanted builds a tenth of the batch and buys a tenth of its tail. The
 first cut of the portfolio tile summed the *unscaled* buy cost — pricing every
-proposal at full volume, six thousand bikes for a sixty-deep list — and reported
-DT 9.4M of cash against DT 956k cleared, a ratio of 0.1× for a programme whose
-best proposal returns 24×. Scaling by the allocated share gives DT 952k and a
-portfolio ratio of 1.0×, with 41 proposals clearing more than they cost. The
-ratio degrades sharply down the ranking, which is the argument for running the
-top few rather than the table.
+proposal at full volume, six thousand bikes for a sixty-deep list — and reports
+DT 13.3M of cash against DT 943k cleared, a ratio of 0.07× for a programme whose
+best proposal returns 40×. Scaling by the allocated share gives DT 1.25M and a
+portfolio ratio of 0.75×, with 41 of the 60 proposals clearing more than they
+cost. The ratio degrades sharply down the ranking — the top five sit near 7.8×
+against a portfolio average below one — which is the argument for running the top
+few rather than the table.
+
+### `prxndach` is not dinar, and three readings were adding it as though it were
+
+The BOM line price and the part master's `prxfobfpiec` are both stored in the
+part's own purchase currency. `frmCostingTMP3` reads the pair
+`(prxndach, Devfpiec)` and multiplies by a `devisesc` rate before it adds
+anything up; three readings in `bike_builder` did not. Measured over the 763,692
+corpus lines:
+
+| currency | lines | summed raw | summed in dinar |
+|---|---:|---:|---:|
+| USD | 406,915 | 949,573 | **2,790,701** |
+| DT | 223,975 | 643,613 | 643,613 |
+| EUR | 124,695 | 98,153 | **330,843** |
+| YEN | 414 | **779,671** | **14,580** |
+| *(no master row)* | 7,693 | 18,533 | 18,533 |
+
+Four fifths of the corpus is bought abroad, so the whole corpus read DT 2.49M
+against a true DT 3.80M, and the median model's build cost read **DT 102.71
+against DT 207.69**. The yen lines fail in the other direction and harder: there
+is no yen rate anywhere in `erp.load_fx`, which reads sales invoices and so knows
+EUR and USD only, so 414 lines were priced at rate 1.0 and read fifty-three times
+what they cost.
+
+That mattered most where nobody would look for it. `learn_tiers` terciles build
+cost *within each wheel size*, and correcting the conversion moves **3,789 of
+11,934 models — 31.7 % — into a different tier**:
+
+| | → economy | → mid | → high-end |
+|---|---:|---:|---:|
+| **economy** | 2,876 | 1,045 | 59 |
+| **mid** | 840 | 2,243 | 893 |
+| **high-end** | 264 | 688 | 3,026 |
+
+`bike_builder.in_dinar()` is now the single conversion, over `purchase_rates()`
+— `gpao_requote._rates()`, which reads `devisesc` and does carry yen. It feeds
+`learn_tiers`, the bought tail of both engines, and the free build's price
+envelope. `test_a_bom_price_is_converted_before_it_is_added` and
+`test_the_rate_table_covers_every_currency_parts_are_bought_in` pin it; the
+second is the one that would have caught the yen.
+
+### A substitution that names only the slot cannot be acted on
+
+The proposal detail used to show the slot, a quantity and a **Substituted**
+checkbox. It never said *what to substitute* — which part comes off the bike and
+which goes on — so the one thing the tab exists to produce was the one thing it
+withheld. Every line now carries both ends from the part master
+(`_name_both_sides`): `orig_num` / `orig_lib` against `part_num` / `part_lib`,
+plus a `change` column that reads `FFS2855.1 → FFS2855.3`, and the detail opens
+on a **Parts to change** tab holding only the lines that actually change.
+
+Naming both sides also made the engine's own choice legible, and it did not
+survive the reading. The top proposal's substitution list contains
+`STK4353.1 → STK15139.1` — stickers at DT 0.15 replaced by stickers at DT 6.00,
+DT 4,680 added to a batch of a hundred — because the engine took `max(unit_dt)`
+among the candidates. That is a defensible objective (the dearest part frees the
+most shelf) but it was never stated and never priced.
+
+### Two objectives in the substitution engine, because that one was hiding
+
+Both halves of the trade are now measured. `saving_dt` re-costs each swap the way
+`frmCostingTMP3` would — the BOM's own price for the line against the catalogue
+price of the part going in, both in dinar at one rate — and `prefer` chooses
+which end of the price list a slot fills from. It decides only *which* candidate
+wins, never *whether* to swap, so both objectives clear exactly the same lines:
+
+| 60-deep shortlist, batch of 100 | stock cleared | bought tail | build cost | swaps | of those cheaper |
+|---|---:|---:|---:|---:|---:|
+| **Clear the most stock** (as it was) | **DT 943,182** | DT 1,249,749 | **+DT 99,804** | 1,037 | 303 |
+| **Cut the build cost** | DT 824,369 | DT 1,557,174 | **−DT 147,678** | 1,015 | 587 |
+
+So the default the tab shipped with was adding **DT 99,804** to what these
+batches cost to make, and the alternative takes **DT 147,678** out of it for
+DT 118,813 less shelf cleared. Neither is wrong; neither was visible.
+`test_the_two_objectives_trade_stock_against_build_cost` pins the direction —
+clearing can never free less, saving can never cost more — which is what would
+catch the preference silently not reaching the candidate choice.
+
+The saving is deliberately **not** measured against what the shelf is carried at.
+3,318 of the 3,355 pool rows are valued at PMP, an average of what was actually
+paid; subtracting a catalogue price from an average would report a valuation
+basis as a saving. `stock_pool` therefore carries `fob_dt` (`prxfobfpiec × cours`,
+the GPAO's own as-of rate) beside `unit_dt`, and only the first may be compared
+with a BOM line.
+
+### Cheaper on the shelf — the question the GPAO has the data for and never asks
+
+`fpieceq` is the interchangeability table. `frmAvailableItem` will already list a
+part's equivalents beside their `prxfobfpiec`, their currency and their stock —
+but ordered by part number, each in its own currency, with no conversion and no
+difference taken, so the screen never says which of two interchangeable parts is
+the cheaper one. The only screen that *acts* on `fpieceq` is
+`frmPlanningGeneral`, and it mentions an equivalent only on a line already in
+shortage (`dt.Select("totQte <= 0")`), as a semicolon-joined string bound to a
+report cell. Substituting to save money, or to consume stock that is not moving,
+is not a question the GPAO asks.
+
+`cheaper_equivalents()` asks it. The funnel, on the current pool:
+
+| | pairs |
+|---|---:|
+| `fpieceq` rows as declared | 10,832 |
+| …where the specified part is in a live bike BOM | 5,549 |
+| …where the equivalent is sitting unmoved | 601 |
+| …**and the unmoved one is the cheaper** | **258** |
+
+Those 258 are worth **DT 58,114** off the cost of building, consume **DT 362,965**
+of unmoved stock doing it, and touch **6,564 of the 11,934 live models** — more
+than half the range. The distribution is the usual one: the top ten pairs are
+57 % of the money and the median pair is worth DT 23.5, so this is a short list
+to act on rather than a programme.
+
+Two deliberate restrictions. It is **declared pairs only** — the looser tiers the
+retrofit engine uses (paired with the same frame before, same slot and wheel
+size) are evidence for a proposal a human is reading line by line, and too weak
+to headline a list that reads as *the ERP says these two are the same part*. And
+the saving is **bounded by the shelf, not by demand**: each pair counts only as
+far as the stock of the cheaper part goes, so it is a saving available rather
+than a saving booked.
+
+The headline "models affected" counts **distinct** models. Summing the per-row
+counts gives 10,633, because one bike often carries two of the specified parts.
 
 ### What it changed on the Actions page
 
-`_rule_dead_stock` sizes the prize at **DT 622,540** — stock cleared after
-allocation, less the scaled bought tail, over the 22 models that clear more than
+`_rule_dead_stock` sizes the prize at **DT 507,092** — stock cleared after
+allocation, less the scaled bought tail, over the 21 models that clear more than
 they cost at a batch of 100. It is deliberately the post-allocation figure: the
 standalone total would put this rule above every other rule on the list while
 being roughly twice the money that exists.
+
+It read DT 622,540 across 22 models until the currency fix above. Nothing about
+the proposals changed; the bought tail stopped being quoted in dollars and
+printed as dinar, so the prize is smaller and the ranking is honest. The rule
+runs on the default objective, *clear the most stock*, so the DT 92,902 those
+batches add to build cost is not netted off it — that trade is on the tab, where
+there is room to state it.
 
 Since the Management view split into pages, this rule also feeds the **Overview**
 page's attention list, so it runs on the landing page. That made its cost worth

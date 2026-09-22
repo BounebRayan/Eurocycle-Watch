@@ -18,7 +18,7 @@ frames, forks, hubs, rims, saddles — because those are what gets over-ordered
 and stranded. The cheap consumable tail (paint, decals, cartons, labels,
 lubricant, ties, screws) is never unmoved because it never stops moving. So
 every proposal needs a bought tail, and that is fine: priced at BOM cost the
-whole tail is a few dinar against a build of a hundred and fifty. **Minimal
+whole tail is about DT 39 against a bike that lists at DT 400. **Minimal
 outside parts has to be measured by value and by lead time, never by line
 count** — a proposal with forty bought lines worth DT 4 is a better answer than
 one with three bought lines worth DT 200.
@@ -30,8 +30,24 @@ so or if a real BOM has paired them with the same frame. Each of those is a
 query over models the factory has actually built and shipped, so the rules
 refresh themselves as the corpus does.
 
-Every substitution carries the tier that licensed it (see `TIERS`), so a
-proposal can be audited line by line instead of taken on trust.
+Every substitution carries the tier that licensed it (see `TIERS`), and both
+ends of it by name — what comes off the bike and what goes on — so a proposal
+can be audited line by line instead of taken on trust.
+
+**Every price here is converted before it is used.** `prxndach` and
+`prxfobfpiec` are stored in the part's own purchase currency and four fifths of
+this corpus is bought abroad, so `in_dinar()` sits in front of every reading
+that adds a BOM price to a stock valuation or compares one part's price with
+another's. It is not a detail: uncorrected, 31.7 % of models land in a different
+tier.
+
+**Two of the questions here have no single right answer, so both are reported.**
+A slot with several shelf parts that fit can be filled from the dear end, which
+frees the most stock, or the cheap end, which leaves the bike costing less than
+the bill of materials it came from (`PREFERENCES`). And `cheaper_equivalents()`
+asks the narrower question the ERP has all the data for and never asks: of two
+parts `fpieceq` already calls interchangeable, is the one gathering dust the
+cheaper one?
 """
 from __future__ import annotations
 
@@ -536,7 +552,6 @@ def _name_both_sides(lines: pd.DataFrame) -> pd.DataFrame:
 
 
 # --------------------------------------------- cheaper on the shelf ---
-@st.cache_data(ttl=1800, show_spinner=False)
 def cheaper_equivalents(corpus: pd.DataFrame, pool: pd.DataFrame, eq: pd.DataFrame,
                         *, declared_only: bool = True) -> pd.DataFrame:
     """Parts a live BOM calls for that have a cheaper interchangeable twin sitting unmoved.
@@ -600,6 +615,8 @@ def cheaper_equivalents(corpus: pd.DataFrame, pool: pd.DataFrame, eq: pd.DataFra
                   .rename(columns={"part_num": "orig_num", "part_lib": "orig_lib"})
                   .drop_duplicates(["part", "pord"]),
                   on=["part", "pord"], how="left")
+    for c in ("orig_num", "orig_lib", "part_num", "part_lib", "supplier_name"):
+        df[c] = df[c].fillna("").astype(str)
 
     # A part with no catalogue price is not a cheaper part, it is a missing one.
     df = df[(df["alt_unit_cost_dt"] > 0) & (df["orig_unit_cost_dt"] > 0)]
@@ -619,6 +636,22 @@ def cheaper_equivalents(corpus: pd.DataFrame, pool: pd.DataFrame, eq: pd.DataFra
     return (df[df["bikes_covered"] >= 1]
             .sort_values("saving_dt", ascending=False)
             .reset_index(drop=True))
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cheaper_shelf_swaps(asof, since, *,
+                        mode: int = gpao_stock.MODE_NEVER) -> pd.DataFrame:
+    """`cheaper_equivalents` behind a key of scalars, not frames.
+
+    Same reason `dead_stock_portfolio` has one. Everything it reads is cached
+    already, but a cache key made of the frames themselves means hashing a
+    763,692-row corpus on every rerun — and this sits on a tab whose currency
+    selector reruns it."""
+    pool = stock_pool(asof, since, mode=mode)
+    corpus = load_corpus()
+    if pool.empty or corpus.empty:
+        return pd.DataFrame()
+    return cheaper_equivalents(corpus, pool, load_equivalences())
 
 
 def models_using(corpus: pd.DataFrame, part, pord) -> pd.DataFrame:
@@ -700,7 +733,9 @@ def propose_retrofit(model: str, corpus: pd.DataFrame, pool: pd.DataFrame,
     rate. It is deliberately *not* measured against what the shelf is carried
     at — most shelf rows are valued at PMP, an average of what was actually
     paid, and subtracting a catalogue price from an average would report a
-    valuation difference as a saving.
+    valuation difference as a saving. Where either side has no price at all —
+    26 pool rows and 14,214 corpus lines carry a zero — the swap is made and the
+    comparison is left blank, because a missing price is not a free part.
     """
     bom = corpus[corpus["model"] == model]
     if bom.empty:
@@ -769,7 +804,12 @@ def propose_retrofit(model: str, corpus: pd.DataFrame, pool: pd.DataFrame,
         # what the shelf is valued at, because that is what gets cleared.
         px = unit.get(chosen, 0.0) if chosen is not None else line.prx_dt
         swap = chosen is not None and chosen != key
-        saving = (line.prx_dt - cat.get(chosen, 0.0)) * need if swap else 0.0
+        # A price of zero on either side is a hole in the part master, not a
+        # free part. Costing a swap against it would report the whole of the
+        # other leg as a saving, so the comparison is left blank instead.
+        new_cost = cat.get(chosen, 0.0) if swap else line.prx_dt
+        priced = swap and new_cost > 0 and line.prx_dt > 0
+        saving = (line.prx_dt - new_cost) * need if priced else 0.0
         if chosen is not None:
             avail[chosen] = avail.get(chosen, 0) - need
         rows.append({
@@ -778,7 +818,7 @@ def propose_retrofit(model: str, corpus: pd.DataFrame, pool: pd.DataFrame,
             "part": use[0], "pord": use[1], "source": src, "tier": tier_used,
             "swap": swap, "qty_needed": need, "unit_dt": px, "line_dt": need * px,
             "orig_unit_cost_dt": line.prx_dt,
-            "unit_cost_dt": cat.get(chosen, line.prx_dt) if swap else line.prx_dt,
+            "unit_cost_dt": new_cost if (priced or not swap) else float("nan"),
             "saving_dt": saving,
         })
 

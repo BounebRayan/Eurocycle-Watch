@@ -10,12 +10,20 @@ reserved since the window opened, 90 % of that value is a part some live bike
 BOM already calls for, and a batch of a hundred bikes can consume DT 50k of it
 against DT 2.5k of parts that have to be bought in.
 
-Two views, as different kinds of answer. **Retrofit** starts from a BOM the
-factory has already built and swaps unmoved parts into it where a rule allows —
-the safe one, and the one to act on. **Free composition** fills each required
-slot from the pool with no model in mind, and exists only to say how much of the
-pile could be cleared if specification were free. See `bike_builder` for the
-rules and `docs/gpao-parity.md` §10 for the stock port underneath.
+Three views, as different kinds of answer. **Free composition** fills each
+required slot from the pool with no model in mind, and says how much of the pile
+could be cleared if specification were free. **Cheaper on the shelf** is the
+narrowest and the most certain: parts a live bike still calls for where the ERP
+itself declares an interchangeable part, that part has not moved, and it is the
+cheaper of the two — 258 of them, worth DT 58k off the cost of building and
+reaching more than half the range. **Retrofit** starts from a BOM the factory has
+already built and swaps unmoved parts into it where a rule allows.
+
+Every substitution names both parts — what comes off and what goes on, with both
+prices — because a row that names only the slot cannot be acted on. See
+`bike_builder` for the rules and `docs/gpao-parity.md` §10 for the stock port
+underneath and for what the GPAO does with `fpieceq`, which is less than it
+looks.
 """
 from __future__ import annotations
 
@@ -54,11 +62,12 @@ def render(ctx: Ctx) -> None:
     try:
         # All five reads sit in one try so a missing database gives the tab a
         # single friendly warning instead of five scattered tracebacks. The
-        # equivalences are read here for the cheaper-on-the-shelf list;
-        # `dead_stock_portfolio` reads them itself and takes the cache hit.
+        # equivalences aren't used here directly — `cheaper_shelf_swaps` and
+        # `dead_stock_portfolio` read them themselves — but loading them now
+        # keeps them inside that guard, and it is a cache hit when they ask.
         pool = B.stock_pool(asof, since, mode=mode)
         corpus = B.load_corpus()
-        eq = B.load_equivalences()
+        B.load_equivalences()
         rules = B.slot_rules(corpus)
         tiers = B.learn_tiers(corpus)
     except Exception as exc:
@@ -77,7 +86,7 @@ def render(ctx: Ctx) -> None:
     st.divider()
     _rules(rules, tiers, corpus, ctx)
     st.divider()
-    _cheaper(corpus, pool, eq, ctx)
+    _cheaper(corpus, asof, since, mode, ctx)
     st.divider()
     _retrofit(tiers, asof, since, mode, batch, ctx)
     st.divider()
@@ -267,8 +276,7 @@ def _rules(rules: B.SlotRules, tiers: pd.DataFrame, corpus: pd.DataFrame, ctx: C
 
 
 # -------------------------------------------------------------- cheaper ---
-def _cheaper(corpus: pd.DataFrame, pool: pd.DataFrame, eq: pd.DataFrame,
-             ctx: Ctx) -> None:
+def _cheaper(corpus: pd.DataFrame, asof, since, mode: int, ctx: Ctx) -> None:
     """Swaps that cost less than what the bill of materials specifies.
 
     The question this answers is the one the ERP has all the data for and never
@@ -285,7 +293,7 @@ def _cheaper(corpus: pd.DataFrame, pool: pd.DataFrame, eq: pd.DataFrame,
         "asked to re-cost the model with the swap in it. These pay twice: the "
         "bike costs less to build, and the pile gets smaller."))
 
-    rows = B.cheaper_equivalents(corpus, pool, eq)
+    rows = B.cheaper_shelf_swaps(asof, since, mode=mode)
     if rows.empty:
         st.info(ctx.t("No declared equivalent in unmoved stock undercuts the part "
                       "the bill of materials specifies."))
@@ -308,7 +316,12 @@ def _cheaper(corpus: pd.DataFrame, pool: pd.DataFrame, eq: pd.DataFrame,
                 help=ctx.t("What the unmoved parts are carried at. This is the same "
                            "pile the proposals below compete for — the two readings "
                            "overlap and must not be added together."))
-    c[3].metric(ctx.t("Models affected"), f"{int(rows['models'].sum()):,}",
+    # Distinct models, not the sum of the per-row counts: the same bike often
+    # carries two of the specified parts, and adding the rows up would count it
+    # twice.
+    touched = corpus.merge(rows[["part", "pord"]].drop_duplicates(),
+                           on=["part", "pord"], how="inner")["model"].nunique()
+    c[3].metric(ctx.t("Models affected"), f"{touched:,}",
                 border=True, height=TILE_H,
                 help=ctx.t("Live bills of materials carrying one of the specified "
                            "parts. One swap can reach many models, which is what "

@@ -470,7 +470,7 @@ def test_a_bom_price_is_converted_before_it_is_added(corpus):
     native = corpus.merge(ccy, on=["part", "pord"], how="left")
     native = native[(native["ccy"] == "DT") & (native["prx"] > 0)].head(500)
     if not native.empty:
-        assert B.in_dinar(native) == pytest.approx(native["prx"])
+        assert B.in_dinar(native).tolist() == pytest.approx(native["prx"].tolist())
 
 
 def test_the_rate_table_covers_every_currency_parts_are_bought_in():
@@ -516,6 +516,12 @@ def test_a_saving_is_only_ever_claimed_on_a_swap(proposals):
         assert (p.lines.loc[~p.lines["swap"], "saving_dt"] == 0).all()
         assert p.saving_dt == pytest.approx(p.lines["saving_dt"].sum())
         assert p.cheaper_swaps <= p.swaps
+        # A price of zero on either side is a hole in the part master. Costing
+        # against it would book the whole of the other leg as a saving, which is
+        # the largest number this could ever report and the most wrong.
+        unpriced = p.lines["swap"] & ((p.lines["unit_cost_dt"].isna())
+                                      | (p.lines["orig_unit_cost_dt"] <= 0))
+        assert (p.lines.loc[unpriced, "saving_dt"] == 0).all()
 
 
 # ------------------------------------------------------- the two objectives ---
